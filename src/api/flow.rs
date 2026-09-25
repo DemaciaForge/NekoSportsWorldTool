@@ -33,12 +33,33 @@ pub struct RunParams {
 
 pub struct RunOutcome {
     pub result: SubmitResult,
-    pub obs_ok: usize,
-    pub detail_ok: bool,
+    pub obs_upload: usize,
+    pub obs_roundtrip: bool,
+    pub detail_request: bool,
+    pub detail_complete: bool,
+    pub reason_list: Vec<Value>,
+    pub detail_checks_passed: bool,
 }
 
 fn sleep_secs(s: u64) {
     std::thread::sleep(std::time::Duration::from_secs(s));
+}
+
+fn reason_list_complete(reason_list: &[Value]) -> bool {
+    !reason_list.is_empty()
+        && reason_list.iter().all(|item| {
+            item.get("complete")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+        })
+}
+
+fn detail_checks_passed(
+    detail_request: bool,
+    detail_complete: bool,
+    reason_list: &[Value],
+) -> bool {
+    detail_request && detail_complete && reason_list_complete(reason_list)
 }
 
 /// 跑步全链。
@@ -68,7 +89,9 @@ pub fn run_full_flow(
     let mut points_ctx = points::fetch_points_context_ext(client, anchor, requested_area_id, log)?;
     // 校园围栏可能随 runModePolicy 返回，而点位接口只给打卡点。
     // 优先保留策略中的真实区域；仅当策略缺失时使用点位中的区域。
-    if pol.area.run_area_id >= 0 { points_ctx.area.run_area_id = pol.area.run_area_id; }
+    if pol.area.run_area_id >= 0 {
+        points_ctx.area.run_area_id = pol.area.run_area_id;
+    }
     if pol.area.geo_fences_json.trim() != "[]" {
         points_ctx.area.geo_fences_json = pol.area.geo_fences_json.clone();
         points_ctx.area.freedom_show_fence = pol.area.freedom_show_fence;
@@ -289,7 +312,7 @@ pub fn run_full_flow(
         track.totalDistance,
         track.totalSteps,
         chrono::Local
-            .timestamp_millis_opt(params.start_ms)
+            .timestamp_millis_opt(start_ms)
             .single()
             .map(|t| t.format("%H:%M:%S").to_string())
             .unwrap_or_default(),
@@ -321,9 +344,20 @@ pub fn run_full_flow(
     // 从提交结果回填 track.startTime（含随机秒偏移），保证 body/OBS/flag 全链一致
     let mut track_for_obs = sp.track.clone();
     track_for_obs.startTime = result.start_ms;
-    let obj = build_obs_object_with_area(&track_for_obs, result.rrid, &result.uuid, sess.uid, &pts, &points_ctx.area);
+    let obj = build_obs_object_with_area(
+        &track_for_obs,
+        result.rrid,
+        &result.uuid,
+        sess.uid,
+        &pts,
+        &points_ctx.area,
+    );
     let expected_summary = super::obs::summarize_object(&obj).ok();
-    if expected_summary.as_ref().map(|summary| !summary.is_expected()).unwrap_or(true) {
+    if expected_summary
+        .as_ref()
+        .map(|summary| !summary.is_expected())
+        .unwrap_or(true)
+    {
         log("⚠ [obs] 本地待上传对象缺少有效路线/区域/围栏数据");
     }
     let payload = obj.to_string().into_bytes();
@@ -332,7 +366,9 @@ pub fn run_full_flow(
     let obs_content_ok = if obs_ok == 2 {
         log("√ [obs] 双 key 上传成功");
         sleep_secs(1);
-        let mut all_valid = expected_summary.as_ref().is_some_and(|summary| summary.is_expected());
+        let mut all_valid = expected_summary
+            .as_ref()
+            .is_some_and(|summary| summary.is_expected());
         for key in &keys {
             match super::obs::fetch_object(client, key, log)
                 .and_then(|value| super::obs::summarize_object(&value))
@@ -343,7 +379,7 @@ pub fn run_full_flow(
                         .is_some_and(|expected| summary.matches(expected));
                     all_valid &= valid;
                     log(&format!(
-                        "{} [obs] 回读校验 key={} matches_upload={} route_points={} runAreaId={} 绿色围栏={} fence_points={}（{} 字节）",
+                        "{} [obs] 回读摘要 key={} obs_summary_match={} route_points={} runAreaId={} 绿色围栏={} fence_points={}（{} 字节）",
                         if valid { "√" } else { "⚠" },
                         key.rsplit('/').next().unwrap_or(key),
                         valid,
@@ -356,12 +392,18 @@ pub fn run_full_flow(
                 }
                 Err(error) => {
                     all_valid = false;
-                    log(&format!("⚠ [obs] 回读校验失败 key={}: {error}", key.rsplit('/').next().unwrap_or(key)));
+                    log(&format!(
+                        "⚠ [obs] 回读校验失败 key={}: {error}",
+                        key.rsplit('/').next().unwrap_or(key)
+                    ));
                 }
             }
         }
-        if all_valid { log("√ [obs] 双 key 内容校验通过"); }
-        else { log("⚠ [obs] 双 key 内容校验未通过"); }
+        if all_valid {
+            log("√ [obs] obs_roundtrip=pass (summary match)");
+        } else {
+            log("⚠ [obs] obs_roundtrip=fail (summary mismatch)");
+        }
         all_valid
     } else {
         log(&format!("⚠ [obs] 上传成功 {obs_ok}/2"));
@@ -371,33 +413,104 @@ pub fn run_full_flow(
     // ⑦ 详情验证
     sleep_secs(2);
     log("[verify] 拉取详情验证…");
-    let record_ok = match fetch_one_record(client, result.rrid) {
+    if let Ok(mut slot) = VERIFY_DETAIL.lock() {
+        *slot = None;
+    }
+    let (detail_request, detail_complete, reason_list) = match fetch_one_record(client, result.rrid)
+    {
         Ok(d) => {
+            let detail_complete = d.get("complete").and_then(|v| v.as_bool()).unwrap_or(false);
+            let reason_list = d
+                .get("reasonList")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             log(&format!(
-                "√ [verify] rrid={} complete={:?} dis={:?} time={:?}",
-                result.rrid,
-                d.get("complete").and_then(|v| v.as_bool()),
-                d.get("totalDis"),
-                d.get("totalTime"),
+                "[detail] detail_request=pass rrid={} detail_complete={} reasonList_count={} dis={:?} time={:?}",
+                result.rrid, detail_complete, reason_list.len(), d.get("totalDis"), d.get("totalTime"),
             ));
+            if reason_list.is_empty() {
+                log("⚠ [detail] reasonList=missing_or_empty");
+            }
+            for (index, item) in reason_list.iter().enumerate() {
+                let complete = item
+                    .get("complete")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let reason = item
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing reason>");
+                log(&format!(
+                    "{} [detail] reasonList[{}] complete={} reason={}",
+                    if complete { "√" } else { "⚠" },
+                    index,
+                    complete,
+                    reason,
+                ));
+            }
             if let Ok(mut slot) = VERIFY_DETAIL.lock() {
                 slot.replace(d.clone());
             }
-            true
+            (true, detail_complete, reason_list)
         }
         Err(e) => {
             log(&format!(
-                "⚠ [verify] 详情拉取失败（提交已成功 rrid={}）：{e}",
+                "⚠ [detail] detail_request=fail rrid={}：{e}",
                 result.rrid
             ));
-            false
+            (false, false, Vec::new())
         }
     };
-    let detail_ok = obs_content_ok && record_ok;
+    let reason_list_ok = reason_list_complete(&reason_list);
+    let detail_checks_passed = detail_checks_passed(detail_request, detail_complete, &reason_list);
     if !obs_content_ok {
-        log("⚠ [verify] OBS 对象内容校验未通过");
+        log("⚠ [verify] obs_roundtrip=fail");
     }
-    Ok(RunOutcome { result, obs_ok, detail_ok })
+    log(&format!(
+        "[verify] obs_upload={}/2 obs_roundtrip={} detail_request={} detail_complete={} reasonList_ok={} detail_checks_passed={}",
+        obs_ok,
+        obs_content_ok,
+        detail_request,
+        detail_complete,
+        reason_list_ok,
+        detail_checks_passed,
+    ));
+    Ok(RunOutcome {
+        result,
+        obs_upload: obs_ok,
+        obs_roundtrip: obs_content_ok,
+        detail_request,
+        detail_complete,
+        reason_list,
+        detail_checks_passed,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{detail_checks_passed, reason_list_complete};
+    use serde_json::json;
+
+    #[test]
+    fn incomplete_detail_cannot_be_reported_as_passed() {
+        let reasons = vec![json!({"reason": "距离不足", "complete": false})];
+        assert!(!reason_list_complete(&reasons));
+        assert!(!detail_checks_passed(true, false, &reasons));
+        assert!(!detail_checks_passed(true, true, &reasons));
+        assert!(!reason_list_complete(&[]));
+        assert!(!reason_list_complete(&[json!({"reason": "unknown"})]));
+        assert!(!detail_checks_passed(
+            false,
+            true,
+            &[json!({"complete": true})]
+        ));
+        assert!(detail_checks_passed(
+            true,
+            true,
+            &[json!({"complete": true})]
+        ));
+    }
 }
 
 /// AI 提交流（UI 线程用）。

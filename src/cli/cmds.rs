@@ -181,11 +181,14 @@ fn cmd_run(rest: &[&str]) -> i32 {
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {
             println!(
-                "跑步提交成功 rrid={} uuid={} obs={}/2 verify={}",
+                "跑步提交成功 rrid={} uuid={} obs_upload={}/2 obs_roundtrip={} detail_request={} detail_complete={} detail_checks_passed={}",
                 out.result.rrid,
                 out.result.uuid,
-                out.obs_ok,
-                if out.detail_ok { "通过" } else { "未通过" }
+                out.obs_upload,
+                out.obs_roundtrip,
+                out.detail_request,
+                out.detail_complete,
+                out.detail_checks_passed,
             );
             0
         }

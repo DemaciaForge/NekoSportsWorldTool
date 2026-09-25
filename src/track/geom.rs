@@ -1,6 +1,6 @@
 //! 轨迹几何与随机工具。
 //!
-//! round 封装、RNG、打卡点 Catmull-Rom 拟合环 + 弧长表 + 弧长插值。
+//! round 封装、RNG、打卡点线段环 + 弧长表 + 弧长插值。
 
 use chrono::{Local, TimeZone};
 use rand::rngs::StdRng;
@@ -80,20 +80,11 @@ pub fn make_point_ring(bd_points: &[(f64, f64)]) -> PointRing {
     let samples = 18usize;
     let mut dense = Vec::with_capacity(n * samples);
     for i in 0..n {
-        let p0 = plane[(i + n - 1) % n];
         let p1 = plane[i];
         let p2 = plane[(i + 1) % n];
-        let p3 = plane[(i + 2) % n];
         for j in 0..samples {
             let t = j as f64 / samples as f64;
-            let (t2, t3) = (t * t, t * t * t);
-            let x = 0.5 * ((2.0 * p1.0) + (-p0.0 + p2.0) * t
-                + (2.0 * p0.0 - 5.0 * p1.0 + 4.0 * p2.0 - p3.0) * t2
-                + (-p0.0 + 3.0 * p1.0 - 3.0 * p2.0 + p3.0) * t3);
-            let y = 0.5 * ((2.0 * p1.1) + (-p0.1 + p2.1) * t
-                + (2.0 * p0.1 - 5.0 * p1.1 + 4.0 * p2.1 - p3.1) * t2
-                + (-p0.1 + 3.0 * p1.1 - 3.0 * p2.1 + p3.1) * t3);
-            dense.push((x, y));
+            dense.push((p1.0 + (p2.0 - p1.0) * t, p1.1 + (p2.1 - p1.1) * t));
         }
     }
     let mut arcs = vec![0.0f64];

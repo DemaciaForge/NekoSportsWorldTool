@@ -161,9 +161,20 @@ impl App {
             let val: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
             if val.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
                 self.status = format!(
-                    "跑步提交成功 rrid={}（OBS {}/2）",
+                    "跑步提交成功 rrid={}（OBS 上传 {}/2，回读={}，详情={}，complete={}）",
                     val["rrid"].as_i64().unwrap_or(0),
-                    val["obs_ok"].as_i64().unwrap_or(0)
+                    val["obs_upload"].as_i64().unwrap_or(0),
+                    if val["obs_roundtrip"].as_bool().unwrap_or(false) {
+                        "通过"
+                    } else {
+                        "失败"
+                    },
+                    if val["detail_request"].as_bool().unwrap_or(false) {
+                        "成功"
+                    } else {
+                        "失败"
+                    },
+                    val["detail_complete"].as_bool().unwrap_or(false),
                 );
                 self.popup = Some(run_popup(&val));
                 self.refresh_data_page();
@@ -392,9 +403,20 @@ fn run_popup(v: &serde_json::Value) -> PopupInfo {
         ),
         format!("开始时间：{}", fmt_hms(v["start"].as_i64().unwrap_or(0))),
         format!(
-            "OBS 上传：{}/2 · 详情验证：{}",
-            v["obs_ok"].as_i64().unwrap_or(0),
-            if v["verify"].as_bool().unwrap_or(false) {
+            "OBS 上传：{}/2 · 回读：{} · 详情请求：{} · complete={} · 详情判定项通过：{}",
+            v["obs_upload"].as_i64().unwrap_or(0),
+            if v["obs_roundtrip"].as_bool().unwrap_or(false) {
+                "通过"
+            } else {
+                "失败"
+            },
+            if v["detail_request"].as_bool().unwrap_or(false) {
+                "成功"
+            } else {
+                "失败"
+            },
+            v["detail_complete"].as_bool().unwrap_or(false),
+            if v["detail_checks_passed"].as_bool().unwrap_or(false) {
                 "通过"
             } else {
                 "未通过"
