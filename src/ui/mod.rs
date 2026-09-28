@@ -13,13 +13,13 @@ pub mod data;
 pub mod device;
 pub mod fonts;
 pub mod jobs;
-pub mod msgs;
 pub mod log;
 pub mod mobile;
+pub mod msgs;
 pub mod records;
 pub mod run;
-pub mod user;
 pub mod theme;
+pub mod user;
 
 use crate::api::model::{self, Config, HeaderIdentity, Session};
 use eframe::egui;
@@ -233,7 +233,9 @@ impl eframe::App for App {
                         .add_enabled(
                             !(self.update.checking || self.update.downloading),
                             egui::Button::new(
-                                egui::RichText::new("检查更新").small().color(theme::text_dim()),
+                                egui::RichText::new("检查更新")
+                                    .small()
+                                    .color(theme::text_dim()),
                             ),
                         )
                         .clicked()
@@ -335,14 +337,22 @@ impl App {
                 dist_max: config.dist_max,
                 pace_min: config.pace_min,
                 pace_max: config.pace_max,
-                manual_altitude_min: config.manual_altitude_range
+                manual_altitude_min: config
+                    .manual_altitude_range
                     .map(|r| r.min_m.to_string())
                     .or_else(|| config.manual_altitude.map(|v| v.to_string()))
                     .unwrap_or_default(),
-                manual_altitude_max: config.manual_altitude_range
+                manual_altitude_max: config
+                    .manual_altitude_range
                     .map(|r| r.max_m.to_string())
                     .or_else(|| config.manual_altitude.map(|v| v.to_string()))
                     .unwrap_or_default(),
+                track_color_mode: config.track_color_mode,
+                track_spec: config.track_spec,
+                custom_track_length: match config.track_spec {
+                    crate::api::model::TrackSpec::Custom { total_m } => total_m.to_string(),
+                    _ => "400".into(),
+                },
                 start_mode: 0,
                 days_ago: 0,
                 hour: 12,
@@ -350,7 +360,11 @@ impl App {
                 face_check: config.face_check,
                 plan: None,
             },
-            ai_page: ai::AiPage { days: 1, per_day: 1, ..Default::default() },
+            ai_page: ai::AiPage {
+                days: 1,
+                per_day: 1,
+                ..Default::default()
+            },
             records_page: records::RecordsPage::default(),
             data_page: data::DataPage::default(),
             user_page: user::UserPage::default(),
@@ -358,7 +372,8 @@ impl App {
             update: about::UpdateUi::default(),
         };
         if app.font_loaded.is_none() {
-            app.log.push("未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块");
+            app.log
+                .push("未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块");
         }
         // 上次更新残留的 .old/.new 顺手清掉
         crate::update::cleanup_residue();
@@ -396,5 +411,4 @@ impl App {
             tx.send(s.to_string()).ok();
         }
     }
-
 }

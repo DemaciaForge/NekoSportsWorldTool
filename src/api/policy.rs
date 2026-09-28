@@ -34,12 +34,19 @@ pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
     let timestamp = get_field(&biz, "timestamp")
         .and_then(|t| t.as_i64())
         .ok_or("policy 响应缺 timestamp")?;
-    let policy = get_field(&biz, "policy").and_then(|t| t.as_i64()).unwrap_or(0);
-    let rule = get_field(&biz, "runRuleModel").cloned().unwrap_or(Value::Null);
+    let policy = get_field(&biz, "policy")
+        .and_then(|t| t.as_i64())
+        .unwrap_or(0);
+    let rule = get_field(&biz, "runRuleModel")
+        .cloned()
+        .unwrap_or(Value::Null);
     Ok(PolicyInfo {
         timestamp,
         policy,
-        min_distance: rule.get("minDistance").and_then(|t| t.as_i64()).unwrap_or(1000),
+        min_distance: rule
+            .get("minDistance")
+            .and_then(|t| t.as_i64())
+            .unwrap_or(1000),
         valid_time: rule.get("validTime").and_then(|t| t.as_i64()).unwrap_or(0),
         area: super::points::area_from_payload(&biz, &[]),
     })

@@ -80,7 +80,12 @@ jobs:
 
       - name: Build (full = GUI + CLI)
         if: env.MODE == 'full'
-        run: cargo build --release --target "$TARGET"
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target "$TARGET"
+          else
+            cargo build --release --target "$TARGET"
+          fi
         shell: bash
 
       - name: Package
@@ -106,5 +111,3 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          # Only one matrix job should generate notes for the shared release.
-          generate_release_notes: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
