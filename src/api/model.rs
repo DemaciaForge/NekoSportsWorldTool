@@ -10,6 +10,25 @@ pub const HOST: &str = "https://run.gxapp.iydsj.com";
 /// 排行榜 / 违规名单域名（信封链与 RUN 相同）。
 pub const DISCOVERY: &str = "https://discovery.gxapp.iydsj.com";
 
+/// Detail-page track display preference. The server may still classify
+/// segments from the submitted point fields; this setting only controls the
+/// generator's requested presentation mode and is kept explicit for logging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackColorMode {
+    FullGreen,
+    #[serde(alias = "preserve_gray")]
+    HalfGreenGray,
+}
+
+pub use crate::track::stadium::TrackSpec;
+
+impl Default for TrackColorMode {
+    fn default() -> Self {
+        Self::FullGreen
+    }
+}
+
 /// 登录态（session.json）。
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Session {
@@ -67,6 +86,12 @@ pub struct Config {
     /// 跑步时将生成器海拔曲线映射到此范围；为空表示不使用范围覆盖。
     #[serde(default)]
     pub manual_altitude_range: Option<crate::track::altitude::AltitudeRange>,
+    /// Requested detail-page route presentation; missing values default to
+    /// the full-green generator mode.
+    #[serde(default)]
+    pub track_color_mode: TrackColorMode,
+    #[serde(default)]
+    pub track_spec: TrackSpec,
     #[serde(default = "default_ai_minutes")]
     pub ai_minutes: i64,
     #[serde(default = "default_ai_reps")]
@@ -108,6 +133,8 @@ impl Default for Config {
             face_check: true,
             manual_altitude: None,
             manual_altitude_range: None,
+            track_color_mode: TrackColorMode::default(),
+            track_spec: TrackSpec::default(),
             ai_minutes: default_ai_minutes(),
             ai_reps: default_ai_reps(),
             update_check: default_update_check(),
@@ -137,7 +164,11 @@ fn write_json<T: serde::Serialize>(name: &str, value: &T) -> Result<(), String> 
 /// 加载设备身份；device_id / app_install_time 缺失时生成一次并立即落盘，
 /// 此后同一设备全生命周期复用（逐请求漂移会影响设备一致性）。
 pub fn load_identity() -> HeaderIdentity {
-    load_identity_for_platform(if cfg!(target_os = "android") { "android" } else { "ios" })
+    load_identity_for_platform(if cfg!(target_os = "android") {
+        "android"
+    } else {
+        "ios"
+    })
 }
 
 fn load_identity_for_platform(platform: &str) -> HeaderIdentity {
@@ -180,7 +211,10 @@ pub struct DeviceInfo {
 }
 
 #[cfg(any(target_os = "android", test))]
-pub fn identity_with_device_info(identity: &HeaderIdentity, info: &DeviceInfo) -> Result<HeaderIdentity, String> {
+pub fn identity_with_device_info(
+    identity: &HeaderIdentity,
+    info: &DeviceInfo,
+) -> Result<HeaderIdentity, String> {
     if info.model.trim().is_empty() || info.os_version.trim().is_empty() {
         return Err("未能读取完整的机型和系统版本，请手动填写".into());
     }
@@ -230,8 +264,22 @@ mod storage_tests {
     use super::*;
 
     #[test]
+    fn track_color_mode_defaults_to_full_green_and_round_trips() {
+        let default_config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(default_config.track_color_mode, TrackColorMode::FullGreen);
+        let mixed: Config = serde_json::from_value(serde_json::json!({
+            "track_color_mode": "half_green_gray"
+        }))
+        .unwrap();
+        assert_eq!(mixed.track_color_mode, TrackColorMode::HalfGreenGray);
+        let encoded = serde_json::to_value(&mixed).unwrap();
+        assert_eq!(encoded["track_color_mode"], "half_green_gray");
+    }
+
+    #[test]
     fn android_identity_import_persists_brand_and_reuses_uuid() {
-        let directory = std::env::temp_dir().join(format!("neko-identity-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("neko-identity-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         crate::platform::TEST_DATA_DIR.with(|p| *p.borrow_mut() = Some(directory.clone()));
         struct Cleanup(std::path::PathBuf);
@@ -247,7 +295,10 @@ mod storage_tests {
         assert_ne!(first.device_name, "iPhone");
         assert!(uuid::Uuid::parse_str(&first.device_id).is_ok());
         let again = load_identity_for_platform("android");
-        assert_eq!(serde_json::to_value(&first).unwrap(), serde_json::to_value(&again).unwrap());
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&again).unwrap()
+        );
 
         let mut existing = first.clone();
         existing.platform = "ios".into();
@@ -257,12 +308,16 @@ mod storage_tests {
         legacy.as_object_mut().unwrap().remove("manufacturer");
         write_json("identity.json", &legacy).unwrap();
         let loaded = load_identity_for_platform("android");
-        assert_eq!(serde_json::to_value(&loaded).unwrap(), serde_json::to_value(&existing).unwrap(),
-            "opening an existing install must not overwrite a manual identity");
+        assert_eq!(
+            serde_json::to_value(&loaded).unwrap(),
+            serde_json::to_value(&existing).unwrap(),
+            "opening an existing install must not overwrite a manual identity"
+        );
 
         let info: DeviceInfo = serde_json::from_str(
             r#"{"manufacturer":"Example","model":"Phone 16","os_version":"16"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(info.manufacturer, "Example");
         let imported = identity_with_device_info(&loaded, &info).unwrap();
         assert_eq!(imported.platform, "android");
@@ -273,31 +328,54 @@ mod storage_tests {
         expected["device_name"] = "Phone 16".into();
         expected["manufacturer"] = "Example".into();
         expected["os_version"] = "16".into();
-        assert_eq!(serde_json::to_value(&imported).unwrap(), expected,
-            "import must preserve UUID, MAC, manual IMEI/IDFA, install time and location");
-        assert_eq!(load_identity().device_name, existing.device_name, "preview must not save implicitly");
+        assert_eq!(
+            serde_json::to_value(&imported).unwrap(),
+            expected,
+            "import must preserve UUID, MAC, manual IMEI/IDFA, install time and location"
+        );
+        assert_eq!(
+            load_identity().device_name,
+            existing.device_name,
+            "preview must not save implicitly"
+        );
         save_identity(&imported).unwrap();
         let stored: serde_json::Value = read_json("identity.json").unwrap();
-        assert_eq!(stored.get("manufacturer").and_then(|value| value.as_str()), Some("Example"),
-            "the consented brand must be written to identity.json");
+        assert_eq!(
+            stored.get("manufacturer").and_then(|value| value.as_str()),
+            Some("Example"),
+            "the consented brand must be written to identity.json"
+        );
         let reloaded = load_identity();
-        assert_eq!(serde_json::to_value(&reloaded).unwrap(), serde_json::to_value(&imported).unwrap(),
-            "brand and identity must survive a fresh load from disk");
+        assert_eq!(
+            serde_json::to_value(&reloaded).unwrap(),
+            serde_json::to_value(&imported).unwrap(),
+            "brand and identity must survive a fresh load from disk"
+        );
         assert_eq!(reloaded.device_id, first.device_id);
-        let (header, _) = crate::crypto::header::build_header_for(&reloaded, 0, "", Some(1_700_000_000_000));
+        let (header, _) =
+            crate::crypto::header::build_header_for(&reloaded, 0, "", Some(1_700_000_000_000));
         let header: serde_json::Value = serde_json::from_str(&header).unwrap();
         assert_eq!(header["DeviceId"], first.device_id);
-        assert_eq!(header["deviceName"], "Phone 16", "brand must not be prepended to the protocol model field");
+        assert_eq!(
+            header["deviceName"], "Phone 16",
+            "brand must not be prepended to the protocol model field"
+        );
         assert_eq!(header["osVersion"], "16");
-        assert!(header.get("manufacturer").is_none() && header.get("brand").is_none(),
-            "persisting local brand metadata must not invent new protocol fields");
+        assert!(
+            header.get("manufacturer").is_none() && header.get("brand").is_none(),
+            "persisting local brand metadata must not invent new protocol fields"
+        );
     }
 
     #[test]
     fn incomplete_native_device_info_cannot_replace_identity() {
         let identity = HeaderIdentity::default();
         for (model, os_version) in [("", "16"), ("Phone", " ")] {
-            let info = DeviceInfo { manufacturer: String::new(), model: model.into(), os_version: os_version.into() };
+            let info = DeviceInfo {
+                manufacturer: String::new(),
+                model: model.into(),
+                os_version: os_version.into(),
+            };
             assert!(identity_with_device_info(&identity, &info).is_err());
         }
     }
@@ -315,8 +393,16 @@ mod storage_tests {
             }
         }
         let _cleanup = Cleanup(directory.clone());
-        assert_eq!(exe_dir(), directory, "storage must use the injected app directory");
-        let session = Session { uid: 123, token: "test-only-token".into(), ..Default::default() };
+        assert_eq!(
+            exe_dir(),
+            directory,
+            "storage must use the injected app directory"
+        );
+        let session = Session {
+            uid: 123,
+            token: "test-only-token".into(),
+            ..Default::default()
+        };
         save_session(&session).unwrap();
         assert!(directory.join("session.json").is_file());
         assert_eq!(load_session().uid, 123);
@@ -335,20 +421,64 @@ struct PointsCache {
     ts: i64,
     anchor: crate::location::Coordinate,
     points: Vec<serde_json::Value>,
+    #[serde(default = "default_run_area_id")]
+    run_area_id: i64,
+    #[serde(default = "default_geo_fences_json")]
+    geo_fences_json: String,
+    #[serde(default)]
+    freedom_show_fence: bool,
+}
+
+fn default_run_area_id() -> i64 {
+    -1
+}
+fn default_geo_fences_json() -> String {
+    "[]".into()
 }
 
 /// 只返回与本次锚点相同的缓存。旧版未记录锚点的缓存会自然失效，避免串城市。
-pub fn load_points_cache_for(anchor: crate::location::Coordinate) -> Option<(i64, Vec<serde_json::Value>)> {
-    let v: serde_json::Value = read_json("points_cache.json")?;
-    let cache: PointsCache = serde_json::from_value(v).ok()?;
-    if !cache.anchor.is_near(anchor, 0.0001) { return None; }
-    let ts = cache.ts;
-    let pts = cache.points;
-    Some((ts, pts))
+pub fn load_points_cache_for(
+    anchor: crate::location::Coordinate,
+) -> Option<(i64, Vec<serde_json::Value>)> {
+    load_points_cache_context_for(anchor).map(|(ts, points, _)| (ts, points))
 }
 
-pub fn save_points_cache(anchor: crate::location::Coordinate, points: &[serde_json::Value]) -> Result<(), String> {
-    let doc = PointsCache { ts: crate::crypto::envelope::now_ms(), anchor, points: points.to_vec() };
+pub fn load_points_cache_context_for(
+    anchor: crate::location::Coordinate,
+) -> Option<(i64, Vec<serde_json::Value>, crate::track::wire::RunAreaMeta)> {
+    let v: serde_json::Value = read_json("points_cache.json")?;
+    let cache: PointsCache = serde_json::from_value(v).ok()?;
+    if !cache.anchor.is_near(anchor, 0.0001) {
+        return None;
+    }
+    let area = crate::track::wire::RunAreaMeta {
+        run_area_id: cache.run_area_id,
+        geo_fences_json: cache.geo_fences_json,
+        freedom_show_fence: cache.freedom_show_fence,
+    };
+    Some((cache.ts, cache.points, area))
+}
+
+pub fn save_points_cache(
+    anchor: crate::location::Coordinate,
+    points: &[serde_json::Value],
+) -> Result<(), String> {
+    save_points_cache_context(anchor, points, &crate::track::wire::RunAreaMeta::default())
+}
+
+pub fn save_points_cache_context(
+    anchor: crate::location::Coordinate,
+    points: &[serde_json::Value],
+    area: &crate::track::wire::RunAreaMeta,
+) -> Result<(), String> {
+    let doc = PointsCache {
+        ts: crate::crypto::envelope::now_ms(),
+        anchor,
+        points: points.to_vec(),
+        run_area_id: area.run_area_id,
+        geo_fences_json: area.geo_fences_json.clone(),
+        freedom_show_fence: area.freedom_show_fence,
+    };
     write_json("points_cache.json", &doc)
 }
 
@@ -357,9 +487,23 @@ mod points_cache_tests {
     use super::*;
     #[test]
     fn cache_is_scoped_to_anchor() {
-        let cache = PointsCache { ts: 1, anchor: crate::location::Coordinate::new(39.9, 116.4, 0.0).unwrap(), points: vec![] };
-        let decoded: PointsCache = serde_json::from_value(serde_json::to_value(cache).unwrap()).unwrap();
-        assert!(decoded.anchor.is_near(crate::location::Coordinate::new(39.9, 116.4, 0.0).unwrap(), 0.0001));
-        assert!(!decoded.anchor.is_near(crate::location::Coordinate::new(38.9, 121.5, 0.0).unwrap(), 0.0001));
+        let cache = PointsCache {
+            ts: 1,
+            anchor: crate::location::Coordinate::new(39.9, 116.4, 0.0).unwrap(),
+            points: vec![],
+            run_area_id: -1,
+            geo_fences_json: "[]".into(),
+            freedom_show_fence: false,
+        };
+        let decoded: PointsCache =
+            serde_json::from_value(serde_json::to_value(cache).unwrap()).unwrap();
+        assert!(decoded.anchor.is_near(
+            crate::location::Coordinate::new(39.9, 116.4, 0.0).unwrap(),
+            0.0001
+        ));
+        assert!(!decoded.anchor.is_near(
+            crate::location::Coordinate::new(38.9, 121.5, 0.0).unwrap(),
+            0.0001
+        ));
     }
 }
