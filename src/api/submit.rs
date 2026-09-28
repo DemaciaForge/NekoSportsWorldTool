@@ -63,6 +63,21 @@ pub fn total_ascent(locs: &[GenPoint]) -> f64 {
     ascent
 }
 
+/// Cumulative negative elevation deltas.
+pub fn total_descent(locs: &[GenPoint]) -> f64 {
+    locs.windows(2)
+        .map(|pair| (pair[0].bdA - pair[1].bdA).max(0.0))
+        .sum()
+}
+
+/// End elevation minus start elevation.
+pub fn net_elevation_change(locs: &[GenPoint]) -> f64 {
+    match (locs.first(), locs.last()) {
+        (Some(first), Some(last)) => last.bdA - first.bdA,
+        _ => 0.0,
+    }
+}
+
 pub struct SubmitParams {
     pub track: Track,
     pub uid: i64,
@@ -108,9 +123,7 @@ pub fn submit_record(
     let total_steps = track.totalSteps;
     let start_ms = track.startTime;
     let stop_ms = start_ms + total_time * 1000;
-    let ascent = track
-        .altitude_gain_override
-        .unwrap_or_else(|| total_ascent(&track.locations));
+    let ascent = total_ascent(&track.locations);
     let power = avg_power(p.weight, total_dis, total_time);
     let kcal = official_kcal(p.weight, total_time, total_dis);
 
@@ -285,7 +298,9 @@ fn truncate_json(v: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{android_tensec, average_step_frequency};
+    use super::{
+        android_tensec, average_step_frequency, net_elevation_change, total_ascent, total_descent,
+    };
 
     fn sample_track() -> crate::track::model::Track {
         crate::track::generator::build(
@@ -349,6 +364,37 @@ mod tests {
                 .map(|window| window["stepsNum"].as_i64().unwrap())
                 .sum::<i64>(),
             track.totalSteps
+        );
+    }
+
+    #[test]
+    fn elevation_stats_use_positive_and_negative_deltas() {
+        let mut track = sample_track();
+        let mut points = Vec::new();
+        for (i, altitude) in [10.0, 15.0, 12.0, 18.0].iter().copied().enumerate() {
+            let mut point = track.locations[0].clone();
+            point.totalTime = i as i64 + 1;
+            point.bdA = altitude;
+            points.push(point);
+        }
+        track.locations = points;
+        let expected_ascent: f64 = track
+            .locations
+            .windows(2)
+            .map(|pair| (pair[1].bdA - pair[0].bdA).max(0.0))
+            .sum();
+        let expected_descent: f64 = track
+            .locations
+            .windows(2)
+            .map(|pair| (pair[0].bdA - pair[1].bdA).max(0.0))
+            .sum();
+        assert!((total_ascent(&track.locations) - expected_ascent).abs() < 1e-9);
+        assert!((total_descent(&track.locations) - expected_descent).abs() < 1e-9);
+        assert!(
+            (net_elevation_change(&track.locations)
+                - (track.locations.last().unwrap().bdA - track.locations.first().unwrap().bdA))
+                .abs()
+                < 1e-9
         );
     }
 }

@@ -71,6 +71,12 @@ pub struct RunPage {
     pub manual_altitude_min: String,
     /// 手动海拔范围最高值。
     pub manual_altitude_max: String,
+    /// Route display preference requested by the user.
+    pub track_color_mode: crate::api::model::TrackColorMode,
+    /// Standard school track preset, or automatic server-fence fitting.
+    pub track_spec: crate::api::model::TrackSpec,
+    /// Custom oval measurement-line length, kept as text for mobile editing.
+    pub custom_track_length: String,
     /// 0=随机时刻 1=指定时刻
     pub start_mode: usize,
     pub days_ago: i64,
@@ -353,6 +359,70 @@ impl App {
                     80.0,
                 );
                 ui.label("留空自动");
+            });
+            mobile::row(ui, |ui| {
+                ui.label("轨迹颜色：");
+                ui.radio_value(
+                    &mut page.track_color_mode,
+                    crate::api::model::TrackColorMode::FullGreen,
+                    "全绿色",
+                );
+                ui.radio_value(
+                    &mut page.track_color_mode,
+                    crate::api::model::TrackColorMode::HalfGreenGray,
+                    "绿灰兼容",
+                );
+            });
+            mobile::row(ui, |ui| {
+                ui.label("操场规格：");
+                egui::ComboBox::from_id_salt("run_track_spec")
+                    .width(170.0)
+                    .selected_text(match page.track_spec {
+                        crate::api::model::TrackSpec::Custom { total_m } => {
+                            format!("自定义 {} 米", total_m)
+                        }
+                        spec => spec.label().to_string(),
+                    })
+                    .show_ui(ui, |ui| {
+                        for spec in [
+                            crate::api::model::TrackSpec::Auto,
+                            crate::api::model::TrackSpec::M200,
+                            crate::api::model::TrackSpec::M300,
+                            crate::api::model::TrackSpec::M400,
+                        ] {
+                            ui.selectable_value(&mut page.track_spec, spec, spec.label());
+                        }
+                        let custom_length = page
+                            .custom_track_length
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|length| (100..=1000).contains(length))
+                            .unwrap_or(400);
+                        ui.selectable_value(
+                            &mut page.track_spec,
+                            crate::api::model::TrackSpec::Custom {
+                                total_m: custom_length,
+                            },
+                            format!("自定义 {} 米", custom_length),
+                        );
+                    });
+                if matches!(page.track_spec, crate::api::model::TrackSpec::Custom { .. }) {
+                    ui.label("长度");
+                    mobile::text_edit(
+                        ui,
+                        "run_custom_track_length",
+                        &mut page.custom_track_length,
+                        crate::platform::InputKind::Text,
+                        70.0,
+                    );
+                    if let Ok(length) = page.custom_track_length.parse::<u32>() {
+                        if (100..=1000).contains(&length) {
+                            page.track_spec =
+                                crate::api::model::TrackSpec::Custom { total_m: length };
+                        }
+                    }
+                    ui.label("100-1000 米");
+                }
             });
             mobile::row(ui, |ui| {
                 ui.label("开始时间：");
@@ -730,6 +800,19 @@ impl App {
         } else {
             "legacy".into()
         };
+        self.config.track_color_mode = page.track_color_mode;
+        let track_spec = match page.track_spec {
+            crate::api::model::TrackSpec::Custom { .. } => page
+                .custom_track_length
+                .parse::<u32>()
+                .ok()
+                .filter(|length| (100..=1000).contains(length))
+                .map(|total_m| crate::api::model::TrackSpec::Custom { total_m })
+                .unwrap_or(crate::api::model::TrackSpec::Auto),
+            spec => spec,
+        };
+        self.config.track_spec = track_spec;
+        let track_color_mode = page.track_color_mode;
         let _ = crate::api::model::save_config(&self.config);
 
         let identity = self.identity.clone();
@@ -753,6 +836,8 @@ impl App {
                 face_check,
                 manual_altitude,
                 manual_altitude_range,
+                track_color_mode,
+                track_spec,
                 seed,
                 route_mode,
             };
@@ -806,6 +891,9 @@ mod tests {
             pace_max: 370.0,
             manual_altitude_min: String::new(),
             manual_altitude_max: String::new(),
+            track_color_mode: crate::api::model::TrackColorMode::FullGreen,
+            track_spec: crate::api::model::TrackSpec::Auto,
+            custom_track_length: "400".into(),
             start_mode,
             days_ago,
             hour: 12,

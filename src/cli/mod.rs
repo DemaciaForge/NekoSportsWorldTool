@@ -23,6 +23,8 @@ fn usage() {
   logout                                   登出并清理本地会话
   run    [--dist km] [--pace 秒/km] [--altitude 米或min-max] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n] [--route legacy|road]
                                            跑步全链：策略-点位-轨迹-提交-OBS-验证（--route 选择路线算法）
+  run    [--track-color full-green|half-green-gray] [--track-spec auto|200|300|400|custom --track-length 100-1000]
+                                           跑步全链轨迹形状与详情页指标设置
   template --file <GPX/JSON>                本地读取真实记录，分析海拔（不会上传）
   ai-list                                  AI 运动项目列表
   ai     --sport <id> [--mode min|count] [--score n]

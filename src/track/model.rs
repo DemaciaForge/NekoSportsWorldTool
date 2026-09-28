@@ -72,7 +72,7 @@ pub struct Track {
     pub speedPerTenSec: Vec<TenWindow>,
     pub stepsPerTenSec: Vec<TenWindow>,
     pub segments: Vec<Segment>,
-    /// 用户指定海拔范围时提交协议使用的目标累计爬升；自动海拔时为空。
+    /// 保留旧版调用方的固定海拔标记。范围海拔不应把最高减最低当作爬升。
     #[serde(skip)]
     pub altitude_gain_override: Option<f64>,
 }
@@ -210,6 +210,23 @@ impl Track {
         }
         self.start_coordinate()
     }
+
+    /// Cumulative positive and negative elevation deltas, plus net change.
+    pub fn elevation_stats(&self) -> (f64, f64, f64) {
+        let mut ascent = 0.0;
+        let mut descent = 0.0;
+        for pair in self.locations.windows(2) {
+            let delta = pair[1].bdA - pair[0].bdA;
+            if delta > 0.0 {
+                ascent += delta;
+            } else {
+                descent += -delta;
+            }
+        }
+        let net = self.locations.last().map(|p| p.bdA).unwrap_or(0.0)
+            - self.locations.first().map(|p| p.bdA).unwrap_or(0.0);
+        (ascent, descent, net)
+    }
 }
 
 #[cfg(test)]
@@ -317,6 +334,70 @@ mod tests {
                 .map(|window| window.value as i64)
                 .sum::<i64>(),
             600
+        );
+        assert!(step_windows.iter().all(|window| window.value >= 0.0));
+        assert!(distance_windows.iter().all(|window| window.value >= 0.0));
+    }
+
+    #[test]
+    fn cumulative_windows_are_monotone_and_share_exact_boundaries() {
+        let mut track = sample_track();
+        track.totalTime = 23;
+        track.totalDistance = 53.0;
+        track.totalSteps = 31;
+        track.locations = [
+            (0, 0.0, 0),
+            (5, 8.0, 6),
+            (11, 25.0, 15),
+            (17, 39.0, 23),
+            (23, 53.0, 31),
+        ]
+        .into_iter()
+        .map(|(time, distance, steps)| GenPoint {
+            totalTime: time,
+            totalDis: distance,
+            steps,
+            ..sample_track().locations[0].clone()
+        })
+        .collect();
+
+        let (distance_windows, step_windows) = track.ten_second_windows();
+        assert_eq!(
+            distance_windows
+                .iter()
+                .map(|window| window.time)
+                .collect::<Vec<_>>(),
+            [10, 10, 3]
+        );
+        assert_eq!(
+            step_windows
+                .iter()
+                .map(|window| window.time)
+                .collect::<Vec<_>>(),
+            [10, 10, 3]
+        );
+        assert!(distance_windows.iter().all(|window| window.value >= 0.0));
+        assert!(step_windows.iter().all(|window| window.value >= 0.0));
+        assert!(
+            (distance_windows
+                .iter()
+                .map(|window| window.value)
+                .sum::<f64>()
+                - track.totalDistance)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(
+            step_windows
+                .iter()
+                .map(|window| window.value as i64)
+                .sum::<i64>(),
+            track.totalSteps
+        );
+        assert_eq!(track.cumulative_at(0), (0.0, 0));
+        assert_eq!(
+            track.cumulative_at(track.totalTime),
+            (track.totalDistance, track.totalSteps)
         );
     }
 }
