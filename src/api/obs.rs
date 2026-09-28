@@ -16,6 +16,7 @@ pub struct ObsSummary {
     pub fence_bytes: usize,
     route_fields: Vec<RoutePointSummary>,
     fence_value: Value,
+    fixed_point_fields: Vec<FixedPointSummary>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +29,42 @@ struct RoutePointSummary {
     total_time: Option<i64>,
     total_dis_1e4: Option<i64>,
     steps: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FixedPointSummary {
+    id: Option<i64>,
+    position: Option<i64>,
+    state: Option<i64>,
+    is_fixed: Option<i64>,
+    is_pass: Option<bool>,
+    lat_1e7: Option<i64>,
+    lon_1e7: Option<i64>,
+    glat_1e7: Option<i64>,
+    glon_1e7: Option<i64>,
+}
+
+impl FixedPointSummary {
+    fn from_value(point: &Value) -> Self {
+        let scaled = |name: &str| {
+            point
+                .get(name)
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+                .map(|value| (value * 10_000_000.0).round() as i64)
+        };
+        Self {
+            id: point.get("id").and_then(value_as_i64),
+            position: point.get("position").and_then(value_as_i64),
+            state: point.get("state").and_then(value_as_i64),
+            is_fixed: point.get("isFixed").and_then(value_as_i64),
+            is_pass: point.get("isPass").and_then(value_as_bool),
+            lat_1e7: scaled("lat"),
+            lon_1e7: scaled("lon"),
+            glat_1e7: scaled("glat"),
+            glon_1e7: scaled("glon"),
+        }
+    }
 }
 
 impl RoutePointSummary {
@@ -222,6 +259,34 @@ pub fn summarize_object(obj: &Value) -> Result<ObsSummary, String> {
         .get("geoFencesJson")
         .ok_or("fixed_point_json 缺少 geoFencesJson")?;
     let (fence_count, fence_bytes, fence_value) = array_field(fence_value, "geoFencesJson")?;
+    let fixed_point_fields = fixed
+        .get("fivePointJson")
+        .map(|value| match value {
+            Value::String(text) => {
+                serde_json::from_str::<Value>(text).map_err(|_| "fivePointJson JSON 无效")
+            }
+            other => Ok(other.clone()),
+        })
+        .transpose()?
+        .unwrap_or_else(|| Value::Array(Vec::new()))
+        .as_array()
+        .ok_or("fivePointJson 不是数组")?
+        .iter()
+        .map(FixedPointSummary::from_value)
+        .collect::<Vec<_>>();
+    if fixed.get("fivePointJson").is_some()
+        && (fixed_point_fields.is_empty()
+            || fixed_point_fields.iter().any(|point| {
+                point.is_pass != Some(true)
+                    || point.is_fixed != Some(1)
+                    || point.lat_1e7.is_none()
+                    || point.lon_1e7.is_none()
+                    || point.glat_1e7.is_none()
+                    || point.glon_1e7.is_none()
+            }))
+    {
+        return Err("fixed_point_json 包含未通过或坐标不完整的打卡点".into());
+    }
 
     Ok(ObsSummary {
         route_points,
@@ -231,6 +296,7 @@ pub fn summarize_object(obj: &Value) -> Result<ObsSummary, String> {
         fence_bytes,
         route_fields,
         fence_value,
+        fixed_point_fields,
     })
 }
 
@@ -256,7 +322,7 @@ mod tests {
     #[test]
     fn summarizes_compressed_route_and_area() {
         let run = json!({"allLocJson": "[{\"gLat\":39.4,\"gLng\":116.2}]", "useZip": false});
-        let fixed = json!({"runAreaId": 42, "freedomShowFence": true, "geoFencesJson": "[{\"lat\":1}]", "useZip": false});
+        let fixed = json!({"runAreaId": 42, "freedomShowFence": true, "geoFencesJson": "[{\"lat\":1}]", "fivePointJson": "[{\"id\":7,\"position\":2,\"state\":1,\"isFixed\":1,\"isPass\":true,\"lat\":39.4,\"lon\":116.2,\"glat\":39.4,\"glon\":116.2}]", "useZip": false});
         let obj = json!({"run_data": crate::track::wire::gz(run.to_string().as_bytes()), "fixed_point_json": crate::track::wire::gz(fixed.to_string().as_bytes())});
         let summary = summarize_object(&obj).unwrap();
         assert_eq!(summary.route_points, 1);
@@ -275,7 +341,7 @@ mod tests {
     #[test]
     fn reports_default_area_without_accepting_it_as_expected() {
         let run = json!({"allLocJson": "[{\"gLat\":39.4,\"gLng\":116.2}]", "useZip": false});
-        let fixed = json!({"runAreaId": -1, "freedomShowFence": false, "geoFencesJson": "[]", "useZip": false});
+        let fixed = json!({"runAreaId": -1, "freedomShowFence": false, "geoFencesJson": "[]", "fivePointJson": "[{\"id\":7,\"position\":2,\"state\":1,\"isFixed\":1,\"isPass\":true,\"lat\":39.4,\"lon\":116.2,\"glat\":39.4,\"glon\":116.2}]", "useZip": false});
         let obj = json!({"run_data": crate::track::wire::gz(run.to_string().as_bytes()), "fixed_point_json": crate::track::wire::gz(fixed.to_string().as_bytes())});
         let summary = summarize_object(&obj).unwrap();
         assert_eq!(summary.route_points, 1);
@@ -286,7 +352,7 @@ mod tests {
     fn accepts_server_fence_when_area_id_is_unspecified() {
         let run = json!({"allLocJson": "[{\"gLat\":39.4,\"gLng\":116.2}]", "useZip": false});
         let fence_json = "[{\"lat\":39.4,\"lon\":116.2}]";
-        let fixed = json!({"runAreaId": -1, "freedomShowFence": true, "geoFencesJson": fence_json, "useZip": false});
+        let fixed = json!({"runAreaId": -1, "freedomShowFence": true, "geoFencesJson": fence_json, "fivePointJson": "[{\"id\":7,\"position\":2,\"state\":1,\"isFixed\":1,\"isPass\":true,\"lat\":39.4,\"lon\":116.2,\"glat\":39.4,\"glon\":116.2}]", "useZip": false});
         let obj = json!({"run_data": crate::track::wire::gz(run.to_string().as_bytes()), "fixed_point_json": crate::track::wire::gz(fixed.to_string().as_bytes())});
         let summary = summarize_object(&obj).unwrap();
         assert_eq!(summary.run_area_id, -1);
@@ -304,6 +370,7 @@ mod tests {
             let fixed = json!({
                 "runAreaId": -1, "freedomShowFence": true,
                 "geoFencesJson": format!("[{{\"lat\":{fence_lat},\"lon\":2}}]"),
+                "fivePointJson": "[{\"id\":7,\"position\":2,\"state\":1,\"isFixed\":1,\"isPass\":true,\"lat\":39.4,\"lon\":116.2,\"glat\":39.4,\"glon\":116.2}]",
                 "useZip": false,
             });
             json!({

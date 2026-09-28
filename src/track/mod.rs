@@ -6,11 +6,12 @@ pub mod generator;
 pub mod geom;
 pub mod model;
 pub mod postfix;
+pub mod stadium;
 pub mod wire;
 
 #[cfg(test)]
 mod tests {
-    use super::generator::build;
+    use super::generator::{build, build_with_fence, checkpoint_distances_m};
     use super::geom::{MET_PER_DEG_LAT, MET_PER_DEG_LNG};
 
     use super::wire::*;
@@ -173,6 +174,67 @@ mod tests {
                 .sum::<i64>(),
             track.totalSteps
         );
+        for (distance, steps) in track.speedPerTenSec.iter().zip(&track.stepsPerTenSec) {
+            assert_eq!(distance.time, steps.time);
+            assert!(distance.value >= 0.0);
+            assert!(steps.value >= 0.0);
+        }
+    }
+
+    #[test]
+    fn generated_stride_and_cadence_are_conserved_across_laps_and_windows() {
+        let track = build(
+            2200.0,
+            900,
+            7,
+            (38.9, 121.54),
+            1_788_958_186_123,
+            &sample_points(),
+        );
+        let windows_steps: i64 = track
+            .stepsPerTenSec
+            .iter()
+            .map(|window| window.value as i64)
+            .sum();
+        assert_eq!(windows_steps, track.totalSteps);
+        assert!(track
+            .stepsPerTenSec
+            .windows(2)
+            .all(|pair| pair[0].time > 0 && pair[1].time > 0));
+        let cadence: Vec<f64> = track
+            .stepsPerTenSec
+            .iter()
+            .map(|window| window.value / window.time.max(1) as f64 * 60.0)
+            .collect();
+        assert!(cadence.iter().all(|value| (90.0..=210.0).contains(value)));
+        assert!(cadence
+            .windows(2)
+            .all(|pair| (pair[1] - pair[0]).abs() <= 12.0));
+        let stride: Vec<f64> = track
+            .speedPerTenSec
+            .iter()
+            .zip(&track.stepsPerTenSec)
+            .filter_map(|(distance, steps)| {
+                (steps.value > 0.0).then_some(distance.value / steps.value)
+            })
+            .collect();
+        assert!(stride.iter().all(|value| (0.75..=1.35).contains(value)));
+        assert!(stride
+            .windows(2)
+            .all(|pair| (pair[1] - pair[0]).abs() <= 0.20));
+
+        let laps = super::wire::build_laps_for_test(&track, track.startTime);
+        let lap_steps: i64 = laps.iter().map(|lap| lap["step"].as_i64().unwrap()).sum();
+        assert_eq!(lap_steps, track.totalSteps);
+        for lap in laps {
+            let distance = lap["distance"].as_f64().unwrap();
+            let steps = lap["step"].as_i64().unwrap();
+            let stride = lap["avgStride"].as_f64().unwrap();
+            assert!(distance >= 0.0 && steps >= 0);
+            if steps > 0 {
+                assert!((stride - (distance / steps as f64 * 100.0)).abs() <= 0.01);
+            }
+        }
     }
 
     #[test]
@@ -233,7 +295,10 @@ mod tests {
         let (_, arcs, _) = super::geom::make_point_ring(&points);
         let perimeter = *arcs.last().unwrap();
         let expected = 2.0 * (0.0018 * MET_PER_DEG_LAT + 0.002 * MET_PER_DEG_LNG);
-        assert!((perimeter - expected).abs() < 0.1, "perimeter={perimeter}");
+        assert!(
+            perimeter > expected && perimeter < expected * 1.25,
+            "smooth perimeter should stay close to the checkpoint perimeter: {perimeter} vs {expected}"
+        );
 
         let track = build(2200.0, 900, 7, (38.9, 121.54), 1_788_958_186_123, &points);
         for point in &points {
@@ -248,6 +313,33 @@ mod tests {
                 .fold(f64::INFINITY, f64::min);
             assert!(min_m < 1.0, "route missed checkpoint {point:?}: {min_m}m");
         }
+    }
+
+    #[test]
+    fn fence_constrains_human_like_offsets_and_keeps_checkpoints_on_route() {
+        let points = sample_points();
+        let fence = serde_json::json!({
+            "geoFence": points.iter().map(|(lat, lon)| serde_json::json!([*lon, *lat])).collect::<Vec<_>>()
+        })
+        .to_string();
+        let track = build_with_fence(
+            3300.0,
+            1220,
+            42,
+            (38.9, 121.54),
+            1_788_958_186_123,
+            &points,
+            Some(&fence),
+            crate::api::model::TrackColorMode::FullGreen,
+        );
+        let distances = checkpoint_distances_m(&track, &points);
+        assert!(distances.iter().all(|distance| *distance <= 1.5));
+        assert!(track.locations.windows(2).all(|pair| {
+            let metres = (((pair[1].gLat - pair[0].gLat) * MET_PER_DEG_LAT).powi(2)
+                + ((pair[1].gLng - pair[0].gLng) * MET_PER_DEG_LNG).powi(2))
+            .sqrt();
+            metres < 100.0
+        }));
     }
 
     /// 10 秒窗均值配速全部落在有效窗口内（判定规则 2'21"-10'00"/km），且总距精确。

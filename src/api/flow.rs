@@ -8,8 +8,9 @@ use super::policy::fetch_policy;
 use super::records::fetch_one_record;
 use super::submit::{submit_record, SubmitParams, SubmitResult};
 use crate::location::Coordinate;
-use crate::track::generator::build as gen_track;
-use crate::track::wire::{build_obs_object_with_area, five_point_wrapper_with_area, obs_keys};
+use crate::track::wire::{
+    build_obs_object_with_area_and_track, five_point_wrapper_with_area_and_track, obs_keys,
+};
 use rand::Rng;
 use serde_json::Value;
 
@@ -25,6 +26,12 @@ pub struct RunParams {
     pub manual_altitude: Option<f64>,
     /// 用户手动填写的海拔范围；与单值字段兼容，范围优先。
     pub manual_altitude_range: Option<crate::track::altitude::AltitudeRange>,
+    /// Requested route presentation mode. The protocol's final color
+    /// classification is server-side, so this remains an explicit diagnostic
+    /// preference until an official type/state mapping is confirmed.
+    pub track_color_mode: crate::api::model::TrackColorMode,
+    /// Standard school track preset, or server-fence compatibility mode.
+    pub track_spec: crate::api::model::TrackSpec,
     pub seed: u64,
 }
 
@@ -89,7 +96,12 @@ pub fn run_full_flow(
     if pol.area.run_area_id >= 0 {
         points_ctx.area.run_area_id = pol.area.run_area_id;
     }
-    if pol.area.geo_fences_json.trim() != "[]" {
+    if pol.area.geo_fences_json.trim() != "[]"
+        && pol.area.freedom_show_fence
+        && serde_json::from_str::<Value>(&pol.area.geo_fences_json)
+            .ok()
+            .is_some_and(|value| matches!(value, Value::Array(ref items) if !items.is_empty()))
+    {
         points_ctx.area.geo_fences_json = pol.area.geo_fences_json.clone();
         points_ctx.area.freedom_show_fence = pol.area.freedom_show_fence;
     }
@@ -104,6 +116,67 @@ pub fn run_full_flow(
         points_ctx.area.freedom_show_fence,
         points_ctx.area.geo_fences_json.len(),
     ));
+    let mut type_counts = std::collections::BTreeMap::<String, usize>::new();
+    for point in &pts {
+        let key = format!(
+            "type={}|state={}|locType={}",
+            point
+                .get("type")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "null".into()),
+            point
+                .get("state")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "null".into()),
+            point
+                .get("locType")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "null".into()),
+        );
+        *type_counts.entry(key).or_default() += 1;
+    }
+    log(&format!(
+        "[track] 轨迹字段诊断（颜色语义待官方详情确认）: {:?}",
+        type_counts
+    ));
+    let missing_checkpoint_metadata = pts
+        .iter()
+        .filter(|point| {
+            ![
+                "id",
+                "pointId",
+                "pointID",
+                "fixedPointId",
+                "fixedPointID",
+                "checkpointId",
+                "checkPointId",
+            ]
+            .iter()
+            .any(|name| point.get(*name).is_some_and(|value| !value.is_null()))
+                || ![
+                    "position",
+                    "pointPosition",
+                    "pointIndex",
+                    "sort",
+                    "sortNum",
+                    "seq",
+                    "sequence",
+                    "order",
+                    "orderNum",
+                ]
+                .iter()
+                .any(|name| point.get(*name).is_some_and(|value| !value.is_null()))
+                || !["state", "pointState", "status", "pointStatus", "passState"]
+                    .iter()
+                    .any(|name| point.get(*name).is_some_and(|value| !value.is_null()))
+        })
+        .count();
+    if missing_checkpoint_metadata > 0 {
+        log(&format!(
+            "⚠ [points] {} 个服务器点位未返回 id/position/state；提交体将使用兼容的顺序 id/position/state 字段",
+            missing_checkpoint_metadata
+        ));
+    }
     for p in pts.iter().take(5) {
         log(&format!(
             "  [points] {} BD=({:.6},{:.6}) GCJ=({},{})",
@@ -135,21 +208,42 @@ pub fn run_full_flow(
         params.dur = fixed_dur;
     }
     log(&format!(
-        "[track] 生成轨迹 {:.0}m / {}s（{} 点位拟合环）…",
+        "[track] 生成轨迹 {:.0}m / {}s（{} 点位拟合环，颜色模式={:?}）…",
         params.dist,
         params.dur,
-        pts_bd.len()
+        pts_bd.len(),
+        params.track_color_mode,
     ));
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
     let start_ms = params.start_ms + rand::thread_rng().gen_range(0..5) * 1000;
-    let mut track = gen_track(
+    let fence_json = (points_ctx.area.freedom_show_fence
+        && points_ctx.area.geo_fences_json.trim() != "[]")
+        .then_some(points_ctx.area.geo_fences_json.as_str());
+    if !matches!(params.track_spec, crate::track::stadium::TrackSpec::Auto) {
+        // An explicit school-track selection is a user constraint. Validate it
+        // before generation so a too-small fence or mismatched checkpoint
+        // response is reported instead of silently changing route geometry.
+        crate::track::stadium::make_stadium_ring(&pts_bd, fence_json, params.track_spec)?;
+    }
+    let mut track = crate::track::generator::build_with_fence_and_spec(
         params.dist,
         params.dur,
         params.seed,
         (anchor.latitude, anchor.longitude),
         start_ms,
         &pts_bd,
+        fence_json,
+        params.track_color_mode,
+        params.track_spec,
     );
+    let checkpoint_distances = crate::track::generator::checkpoint_distances_m(&track, &pts_bd);
+    let max_checkpoint_distance = checkpoint_distances.iter().copied().fold(0.0_f64, f64::max);
+    log(&format!(
+        "[track] 打卡点路线命中：{} 个，最大偏差 {:.2}m",
+        checkpoint_distances.len(),
+        max_checkpoint_distance
+    ));
+    crate::track::generator::validate_checkpoint_hits(&track, &pts_bd)?;
     if let Some(range) = params.manual_altitude_range {
         crate::track::altitude::override_bd_a_range(&mut track, range)?;
         log(&format!(
@@ -177,9 +271,19 @@ pub fn run_full_flow(
             .map(|t| t.format("%H:%M:%S").to_string())
             .unwrap_or_default(),
     ));
+    let (ascent, descent, net) = track.elevation_stats();
+    log(&format!(
+        "[track] 海拔统计：起点 {:.2}m，终点 {:.2}m，累计爬升 {:.2}m，累计下降 {:.2}m，净变化 {:.2}m",
+        track.locations.first().map(|point| point.bdA).unwrap_or(0.0),
+        track.locations.last().map(|point| point.bdA).unwrap_or(0.0),
+        ascent,
+        descent,
+        net,
+    ));
 
     // ④ 五点 wrapper（跑完态）
-    let five = five_point_wrapper_with_area(&pts, track.startTime, &points_ctx.area);
+    let five =
+        five_point_wrapper_with_area_and_track(&pts, track.startTime, &points_ctx.area, &track);
     let _ = &five;
 
     // ⑤ 提交（sportType=1）
@@ -204,7 +308,7 @@ pub fn run_full_flow(
     // 从提交结果回填 track.startTime（含随机秒偏移），保证 body/OBS/flag 全链一致
     let mut track_for_obs = sp.track.clone();
     track_for_obs.startTime = result.start_ms;
-    let obj = build_obs_object_with_area(
+    let obj = build_obs_object_with_area_and_track(
         &track_for_obs,
         result.rrid,
         &result.uuid,

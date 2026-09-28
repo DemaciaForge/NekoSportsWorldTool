@@ -135,6 +135,36 @@ fn cmd_run(rest: &[&str]) -> i32 {
         },
         None => (None, None),
     };
+    let track_color_mode = match get(&flags, "track-color") {
+        None => crate::api::model::TrackColorMode::FullGreen,
+        Some("mixed") | Some("gray") | Some("grey") | Some("half-green-gray") => {
+            crate::api::model::TrackColorMode::HalfGreenGray
+        }
+        Some("green") | Some("full-green") | Some("full_green") => {
+            crate::api::model::TrackColorMode::FullGreen
+        }
+        Some(value) => {
+            eprintln!("--track-color 必须是 full-green 或 half-green-gray（收到 {value}）");
+            return 1;
+        }
+    };
+    let custom_track_length = get(&flags, "track-length").and_then(|v| v.parse::<u32>().ok());
+    if get(&flags, "track-length").is_some() && custom_track_length.is_none() {
+        eprintln!("--track-length 必须是 100-1000 米之间的整数");
+        return 1;
+    }
+    let track_spec = match get(&flags, "track-spec") {
+        None => crate::track::stadium::TrackSpec::Auto,
+        Some(value) => {
+            match crate::track::stadium::TrackSpec::parse_with_length(value, custom_track_length) {
+                Some(spec) => spec,
+                None => {
+                    eprintln!("--track-spec 必须是 auto、200、300、400 或 custom（也接受 200m/300m/400m；custom 需同时提供 --track-length 100-1000）");
+                    return 1;
+                }
+            }
+        }
+    };
     let seed: u64 = get(&flags, "seed")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
@@ -192,6 +222,8 @@ fn cmd_run(rest: &[&str]) -> i32 {
         face_check: face as i64,
         manual_altitude,
         manual_altitude_range,
+        track_color_mode,
+        track_spec,
         seed,
     };
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
@@ -368,10 +400,7 @@ fn cmd_records_raw(rest: &[&str]) -> i32 {
                     crate::textlog::truncate(&arr[n - 1].to_string(), 300)
                 );
             } else {
-                println!(
-                    "data: {}",
-                    crate::textlog::truncate(&data.to_string(), 500)
-                );
+                println!("data: {}", crate::textlog::truncate(&data.to_string(), 500));
             }
             0
         }
