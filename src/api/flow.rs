@@ -8,10 +8,10 @@ use super::policy::fetch_policy;
 use super::records::fetch_one_record;
 use super::submit::{submit_record, SubmitParams, SubmitResult};
 use crate::location::Coordinate;
-use crate::track::generate_road::RouteMode;
-use crate::track::generator::build as gen_track;
-use crate::track::wire::{build_obs_object, five_point_wrapper, obs_keys};
-use rand_distr::{Distribution, Normal};
+use crate::track::wire::{
+    build_obs_object_with_area_and_track, five_point_wrapper_with_area_and_track, obs_keys,
+};
+use rand::Rng;
 use serde_json::Value;
 
 #[derive(Clone, Copy)]
@@ -26,19 +26,44 @@ pub struct RunParams {
     pub manual_altitude: Option<f64>,
     /// 用户手动填写的海拔范围；与单值字段兼容，范围优先。
     pub manual_altitude_range: Option<crate::track::altitude::AltitudeRange>,
+    /// Requested route presentation mode. The protocol's final color
+    /// classification is server-side, so this remains an explicit diagnostic
+    /// preference until an official type/state mapping is confirmed.
+    pub track_color_mode: crate::api::model::TrackColorMode,
+    /// Standard school track preset, or server-fence compatibility mode.
+    pub track_spec: crate::api::model::TrackSpec,
     pub seed: u64,
-    /// 路线算法模式。
-    pub route_mode: RouteMode,
 }
 
 pub struct RunOutcome {
     pub result: SubmitResult,
-    pub obs_ok: usize,
-    pub detail_ok: bool,
+    pub obs_upload: usize,
+    pub obs_roundtrip: bool,
+    pub detail_request: bool,
+    pub detail_complete: bool,
+    pub reason_list: Vec<Value>,
+    pub detail_checks_passed: bool,
 }
 
 fn sleep_secs(s: u64) {
     std::thread::sleep(std::time::Duration::from_secs(s));
+}
+
+fn reason_list_complete(reason_list: &[Value]) -> bool {
+    !reason_list.is_empty()
+        && reason_list.iter().all(|item| {
+            item.get("complete")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+        })
+}
+
+fn detail_checks_passed(
+    detail_request: bool,
+    detail_complete: bool,
+    reason_list: &[Value],
+) -> bool {
+    detail_request && detail_complete && reason_list_complete(reason_list)
 }
 
 /// 跑步全链。
@@ -64,11 +89,94 @@ pub fn run_full_flow(
         return Err("请先在设备信息页填写本次跑步所在城市和定位锚点，不能使用大连默认配置".into());
     }
     let anchor: Coordinate = client.identity.anchor_coordinate()?;
-    let pts = points::fetch_points(client, anchor, log)?;
+    let requested_area_id = (pol.area.run_area_id >= 0).then(|| pol.area.run_area_id.to_string());
+    let mut points_ctx = points::fetch_points_context_ext(client, anchor, requested_area_id, log)?;
+    // 校园围栏可能随 runModePolicy 返回，而点位接口只给打卡点。
+    // 优先保留策略中的真实区域；仅当策略缺失时使用点位中的区域。
+    if pol.area.run_area_id >= 0 {
+        points_ctx.area.run_area_id = pol.area.run_area_id;
+    }
+    if pol.area.geo_fences_json.trim() != "[]"
+        && pol.area.freedom_show_fence
+        && serde_json::from_str::<Value>(&pol.area.geo_fences_json)
+            .ok()
+            .is_some_and(|value| matches!(value, Value::Array(ref items) if !items.is_empty()))
+    {
+        points_ctx.area.geo_fences_json = pol.area.geo_fences_json.clone();
+        points_ctx.area.freedom_show_fence = pol.area.freedom_show_fence;
+    }
+    let pts = points_ctx.points.clone();
     if pts.is_empty() {
         return Err("实时点位为空 —— 拒绝本地样本兜底".into());
     }
-    log(&format!("√ [points] {} 个点位", pts.len()));
+    log(&format!(
+        "√ [points] {} 个点位，runAreaId={}，绿色围栏={}（{} 字节）",
+        pts.len(),
+        points_ctx.area.run_area_id,
+        points_ctx.area.freedom_show_fence,
+        points_ctx.area.geo_fences_json.len(),
+    ));
+    let mut type_counts = std::collections::BTreeMap::<String, usize>::new();
+    for point in &pts {
+        let key = format!(
+            "type={}|state={}|locType={}",
+            point
+                .get("type")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "null".into()),
+            point
+                .get("state")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "null".into()),
+            point
+                .get("locType")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "null".into()),
+        );
+        *type_counts.entry(key).or_default() += 1;
+    }
+    log(&format!(
+        "[track] 轨迹字段诊断（颜色语义待官方详情确认）: {:?}",
+        type_counts
+    ));
+    let missing_checkpoint_metadata = pts
+        .iter()
+        .filter(|point| {
+            ![
+                "id",
+                "pointId",
+                "pointID",
+                "fixedPointId",
+                "fixedPointID",
+                "checkpointId",
+                "checkPointId",
+            ]
+            .iter()
+            .any(|name| point.get(*name).is_some_and(|value| !value.is_null()))
+                || ![
+                    "position",
+                    "pointPosition",
+                    "pointIndex",
+                    "sort",
+                    "sortNum",
+                    "seq",
+                    "sequence",
+                    "order",
+                    "orderNum",
+                ]
+                .iter()
+                .any(|name| point.get(*name).is_some_and(|value| !value.is_null()))
+                || !["state", "pointState", "status", "pointStatus", "passState"]
+                    .iter()
+                    .any(|name| point.get(*name).is_some_and(|value| !value.is_null()))
+        })
+        .count();
+    if missing_checkpoint_metadata > 0 {
+        log(&format!(
+            "⚠ [points] {} 个服务器点位未返回 id/position/state；提交体将使用兼容的顺序 id/position/state 字段",
+            missing_checkpoint_metadata
+        ));
+    }
     for p in pts.iter().take(5) {
         log(&format!(
             "  [points] {} BD=({:.6},{:.6}) GCJ=({},{})",
@@ -80,66 +188,8 @@ pub fn run_full_flow(
         ));
     }
 
-    // ③ 轨迹生成（必经点 + 打卡点）
+    // ③ 轨迹生成（打卡点拟合环）
     let pts_bd = points::points_bd(&pts);
-    // 必经点保持策略顺序置于前端（waypoints[0] 即起点），剩余打卡点去重后按质心角
-    // 排序，使环序自然且不破坏必经点顺序。
-    let mut route_pts: Vec<(f64, f64)> = pol.must_points.clone();
-    let mut free: Vec<(f64, f64)> = Vec::new();
-    for p in &pts_bd {
-        if !route_pts
-            .iter()
-            .any(|q| (q.0 - p.0).abs() < 1e-6 && (q.1 - p.1).abs() < 1e-6)
-        {
-            free.push(*p);
-        }
-    }
-    if !free.is_empty() {
-        route_pts.extend(crate::track::generate_road::radial_order(&free));
-    }
-    if !pol.must_points.is_empty() {
-        log(&format!(
-            "√ [policy] 必经点 {} 个（保持顺序），合并后路线 waypoint 共 {} 个",
-            pol.must_points.len(),
-            route_pts.len()
-        ));
-        // 防御性日志：must_points 的「首个=起点」语义未经证实（提交时 skip(1) 依赖此假设），
-        // 逐点打印便于抓真实响应核对，避免首个必经点被静默丢弃。
-        for (i, &(mlat, mlon)) in pol.must_points.iter().enumerate() {
-            log(&format!(
-                "  [policy] must_points[{i}] BD=({mlat:.6},{mlon:.6}){}",
-                if i == 0 { "（假设为起点）" } else { "（必经点）" }
-            ));
-        }
-    } else {
-        log(&format!(
-            "[policy] 响应未含必经点列表，仅用打卡点 {} 个",
-            route_pts.len()
-        ));
-    }
-    if let Some(&(slat, slon)) = route_pts.first() {
-        log(&format!("√ [track] 起点 BD=({slat:.6},{slon:.6})"));
-    }
-    // 用打卡点随机偏移更新锚点并持久化：下次拉点位即学校真实坐标，摆脱写死的默认值
-    if !pts_bd.is_empty() {
-        let idx = (rand::random::<f64>() * pts_bd.len() as f64) as usize;
-        let (clat, clng) = pts_bd[idx];
-        let mut rng = rand::thread_rng();
-        let normal = Normal::<f64>::new(0.0, 120.0).unwrap();
-        let dlat =
-            normal.sample(&mut rng).clamp(-200.0, 200.0) / crate::track::geom::MET_PER_DEG_LAT;
-        let dlng =
-            normal.sample(&mut rng).clamp(-200.0, 200.0) / crate::track::geom::MET_PER_DEG_LNG;
-        client.identity.anchor_lat = clat + dlat;
-        client.identity.anchor_lon = clng + dlng;
-        if let Err(e) = super::model::save_identity(&client.identity) {
-            log(&format!("⚠ 锚点持久化失败: {e}"));
-        }
-        // 用漂移后的新锚点重存点位缓存，使缓存锚点与持久化锚点一致，避免预览锚点失配。
-        if let Ok(new_anchor) = client.identity.anchor_coordinate() {
-            let _ = super::model::save_points_cache(new_anchor, &pts);
-        }
-    }
     // 平均配速须落在有效窗口内（否则逐点速度无法全窗内），越界时修正时长
     let mut params = *params;
     let avg = params.dist / params.dur as f64;
@@ -158,100 +208,42 @@ pub fn run_full_flow(
         params.dur = fixed_dur;
     }
     log(&format!(
-        "[track] 生成轨迹 {:.0}m / {}s（{} 点位）…",
+        "[track] 生成轨迹 {:.0}m / {}s（{} 点位拟合环，颜色模式={:?}）…",
         params.dist,
         params.dur,
-        route_pts.len()
+        pts_bd.len(),
+        params.track_color_mode,
     ));
     // 随机 0-4 秒偏移（终端上报的 flag 与首点差 <5s），轨迹/提交/OBS/五点统一使用
-    let start_ms = params.start_ms + (rand::random::<i64>() % 5) * 1000;
-    let mut track = match params.route_mode {
-        RouteMode::Road => {
-            let cfg = crate::api::model::load_config();
-            if cfg.osm_path.is_empty() {
-                log("⚠ [track] 未配置 OSM 路网，回退经典算法");
-                gen_track(
-                    params.dist,
-                    params.dur,
-                    params.seed,
-                    (anchor.latitude, anchor.longitude),
-                    start_ms,
-                    &pts_bd,
-                )
-            } else {
-                match crate::track::generate_road::load_network_path(&cfg.osm_path) {
-                    Ok(mut net) => {
-                        crate::track::generate_road::align_network(&mut net);
-                        // 电子围栏：裁剪到围栏内道路（失败/无围栏则跳过）
-                        let fences = match crate::api::fence::fetch_geo_fence(client) {
-                            Ok(f) => {
-                                let _ = crate::api::model::save_fence_cache(&f);
-                                log(&format!("√ [track] 电子围栏 {} 个", f.len()));
-                                f
-                            }
-                            Err(e) => {
-                                log(&format!("⚠ [track] 围栏获取失败，回退缓存: {e}"));
-                                crate::api::model::load_fence_cache().unwrap_or_default()
-                            }
-                        };
-                        let filtered = crate::track::generate_road::apply_fences(&net, &fences);
-                        // 强制必经点（不含起点）：其余打卡点仅软引导 + <40m 吸附
-                        let must_bd: Vec<(f64, f64)> =
-                            pol.must_points.iter().skip(1).copied().collect();
-                        match crate::track::generate_road::build_road(
-                            params.dist,
-                            params.dur,
-                            params.seed,
-                            start_ms,
-                            &route_pts,
-                            &must_bd,
-                            &filtered,
-                        ) {
-                            Ok(t) => {
-                                log(&format!(
-                                    "√ [track] 真实道路路由 {} 点 / {} 建筑 / {} 围栏",
-                                    t.locations.len(),
-                                    filtered.buildings.len(),
-                                    fences.len()
-                                ));
-                                t
-                            }
-                            Err(e) => {
-                                log(&format!("⚠ [track] 道路路由失败，回退经典算法: {e}"));
-                                gen_track(
-                                    params.dist,
-                                    params.dur,
-                                    params.seed,
-                                    (anchor.latitude, anchor.longitude),
-                                    start_ms,
-                                    &pts_bd,
-                                )
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log(&format!("⚠ [track] 路网加载失败，回退经典算法: {e}"));
-                        gen_track(
-                            params.dist,
-                            params.dur,
-                            params.seed,
-                            (anchor.latitude, anchor.longitude),
-                            start_ms,
-                            &pts_bd,
-                        )
-                    }
-                }
-            }
-        }
-        RouteMode::Legacy => gen_track(
-            params.dist,
-            params.dur,
-            params.seed,
-            (anchor.latitude, anchor.longitude),
-            start_ms,
-            &pts_bd,
-        ),
-    };
+    let start_ms = params.start_ms + rand::thread_rng().gen_range(0..5) * 1000;
+    let fence_json = (points_ctx.area.freedom_show_fence
+        && points_ctx.area.geo_fences_json.trim() != "[]")
+        .then_some(points_ctx.area.geo_fences_json.as_str());
+    if !matches!(params.track_spec, crate::track::stadium::TrackSpec::Auto) {
+        // An explicit school-track selection is a user constraint. Validate it
+        // before generation so a too-small fence or mismatched checkpoint
+        // response is reported instead of silently changing route geometry.
+        crate::track::stadium::make_stadium_ring(&pts_bd, fence_json, params.track_spec)?;
+    }
+    let mut track = crate::track::generator::build_with_fence_and_spec(
+        params.dist,
+        params.dur,
+        params.seed,
+        (anchor.latitude, anchor.longitude),
+        start_ms,
+        &pts_bd,
+        fence_json,
+        params.track_color_mode,
+        params.track_spec,
+    );
+    let checkpoint_distances = crate::track::generator::checkpoint_distances_m(&track, &pts_bd);
+    let max_checkpoint_distance = checkpoint_distances.iter().copied().fold(0.0_f64, f64::max);
+    log(&format!(
+        "[track] 打卡点路线命中：{} 个，最大偏差 {:.2}m",
+        checkpoint_distances.len(),
+        max_checkpoint_distance
+    ));
+    crate::track::generator::validate_checkpoint_hits(&track, &pts_bd)?;
     if let Some(range) = params.manual_altitude_range {
         crate::track::altitude::override_bd_a_range(&mut track, range)?;
         log(&format!(
@@ -274,14 +266,24 @@ pub fn run_full_flow(
         track.totalDistance,
         track.totalSteps,
         chrono::Local
-            .timestamp_millis_opt(params.start_ms)
+            .timestamp_millis_opt(start_ms)
             .single()
             .map(|t| t.format("%H:%M:%S").to_string())
             .unwrap_or_default(),
     ));
+    let (ascent, descent, net) = track.elevation_stats();
+    log(&format!(
+        "[track] 海拔统计：起点 {:.2}m，终点 {:.2}m，累计爬升 {:.2}m，累计下降 {:.2}m，净变化 {:.2}m",
+        track.locations.first().map(|point| point.bdA).unwrap_or(0.0),
+        track.locations.last().map(|point| point.bdA).unwrap_or(0.0),
+        ascent,
+        descent,
+        net,
+    ));
 
     // ④ 五点 wrapper（跑完态）
-    let five = five_point_wrapper(&pts, track.startTime);
+    let five =
+        five_point_wrapper_with_area_and_track(&pts, track.startTime, &points_ctx.area, &track);
     let _ = &five;
 
     // ⑤ 提交（sportType=1）
@@ -306,46 +308,173 @@ pub fn run_full_flow(
     // 从提交结果回填 track.startTime（含随机秒偏移），保证 body/OBS/flag 全链一致
     let mut track_for_obs = sp.track.clone();
     track_for_obs.startTime = result.start_ms;
-    let obj = build_obs_object(&track_for_obs, result.rrid, &result.uuid, sess.uid, &pts);
+    let obj = build_obs_object_with_area_and_track(
+        &track_for_obs,
+        result.rrid,
+        &result.uuid,
+        sess.uid,
+        &pts,
+        &points_ctx.area,
+    );
+    let expected_summary = super::obs::summarize_object(&obj).ok();
+    if expected_summary
+        .as_ref()
+        .map(|summary| !summary.is_expected())
+        .unwrap_or(true)
+    {
+        log("⚠ [obs] 本地待上传对象缺少有效路线/区域/围栏数据");
+    }
     let payload = obj.to_string().into_bytes();
     let keys = obs_keys(&track_for_obs, result.rrid, &result.uuid);
     let obs_ok = super::obs::upload_both_keys(client, &keys, &payload, log);
-    if obs_ok == 2 {
+    let obs_content_ok = if obs_ok == 2 {
         log("√ [obs] 双 key 上传成功");
+        sleep_secs(1);
+        let mut all_valid = expected_summary
+            .as_ref()
+            .is_some_and(|summary| summary.is_expected());
+        for key in &keys {
+            match super::obs::fetch_object(client, key, log)
+                .and_then(|value| super::obs::summarize_object(&value))
+            {
+                Ok(summary) => {
+                    let valid = expected_summary
+                        .as_ref()
+                        .is_some_and(|expected| summary.matches(expected));
+                    all_valid &= valid;
+                    log(&format!(
+                        "{} [obs] 回读摘要 key={} obs_summary_match={} route_points={} runAreaId={} 绿色围栏={} fence_points={}（{} 字节）",
+                        if valid { "√" } else { "⚠" },
+                        key.rsplit('/').next().unwrap_or(key),
+                        valid,
+                        summary.route_points,
+                        summary.run_area_id,
+                        summary.show_fence,
+                        summary.fence_count,
+                        summary.fence_bytes,
+                    ));
+                }
+                Err(error) => {
+                    all_valid = false;
+                    log(&format!(
+                        "⚠ [obs] 回读校验失败 key={}: {error}",
+                        key.rsplit('/').next().unwrap_or(key)
+                    ));
+                }
+            }
+        }
+        if all_valid {
+            log("√ [obs] obs_roundtrip=pass (summary match)");
+        } else {
+            log("⚠ [obs] obs_roundtrip=fail (summary mismatch)");
+        }
+        all_valid
     } else {
         log(&format!("⚠ [obs] 上传成功 {obs_ok}/2"));
-    }
+        false
+    };
 
     // ⑦ 详情验证
     sleep_secs(2);
     log("[verify] 拉取详情验证…");
-    let detail_ok = match fetch_one_record(client, result.rrid) {
+    if let Ok(mut slot) = VERIFY_DETAIL.lock() {
+        *slot = None;
+    }
+    let (detail_request, detail_complete, reason_list) = match fetch_one_record(client, result.rrid)
+    {
         Ok(d) => {
+            let detail_complete = d.get("complete").and_then(|v| v.as_bool()).unwrap_or(false);
+            let reason_list = d
+                .get("reasonList")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
             log(&format!(
-                "√ [verify] rrid={} complete={:?} dis={:?} time={:?}",
-                result.rrid,
-                d.get("complete").and_then(|v| v.as_bool()),
-                d.get("totalDis"),
-                d.get("totalTime"),
+                "[detail] detail_request=pass rrid={} detail_complete={} reasonList_count={} dis={:?} time={:?}",
+                result.rrid, detail_complete, reason_list.len(), d.get("totalDis"), d.get("totalTime"),
             ));
+            if reason_list.is_empty() {
+                log("⚠ [detail] reasonList=missing_or_empty");
+            }
+            for (index, item) in reason_list.iter().enumerate() {
+                let complete = item
+                    .get("complete")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let reason = item
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing reason>");
+                log(&format!(
+                    "{} [detail] reasonList[{}] complete={} reason={}",
+                    if complete { "√" } else { "⚠" },
+                    index,
+                    complete,
+                    reason,
+                ));
+            }
             if let Ok(mut slot) = VERIFY_DETAIL.lock() {
                 slot.replace(d.clone());
             }
-            true
+            (true, detail_complete, reason_list)
         }
         Err(e) => {
             log(&format!(
-                "⚠ [verify] 详情拉取失败（提交已成功 rrid={}）：{e}",
+                "⚠ [detail] detail_request=fail rrid={}：{e}",
                 result.rrid
             ));
-            false
+            (false, false, Vec::new())
         }
     };
+    let reason_list_ok = reason_list_complete(&reason_list);
+    let detail_checks_passed = detail_checks_passed(detail_request, detail_complete, &reason_list);
+    if !obs_content_ok {
+        log("⚠ [verify] obs_roundtrip=fail");
+    }
+    log(&format!(
+        "[verify] obs_upload={}/2 obs_roundtrip={} detail_request={} detail_complete={} reasonList_ok={} detail_checks_passed={}",
+        obs_ok,
+        obs_content_ok,
+        detail_request,
+        detail_complete,
+        reason_list_ok,
+        detail_checks_passed,
+    ));
     Ok(RunOutcome {
         result,
-        obs_ok,
-        detail_ok,
+        obs_upload: obs_ok,
+        obs_roundtrip: obs_content_ok,
+        detail_request,
+        detail_complete,
+        reason_list,
+        detail_checks_passed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{detail_checks_passed, reason_list_complete};
+    use serde_json::json;
+
+    #[test]
+    fn incomplete_detail_cannot_be_reported_as_passed() {
+        let reasons = vec![json!({"reason": "距离不足", "complete": false})];
+        assert!(!reason_list_complete(&reasons));
+        assert!(!detail_checks_passed(true, false, &reasons));
+        assert!(!detail_checks_passed(true, true, &reasons));
+        assert!(!reason_list_complete(&[]));
+        assert!(!reason_list_complete(&[json!({"reason": "unknown"})]));
+        assert!(!detail_checks_passed(
+            false,
+            true,
+            &[json!({"complete": true})]
+        ));
+        assert!(detail_checks_passed(
+            true,
+            true,
+            &[json!({"complete": true})]
+        ));
+    }
 }
 
 /// AI 提交流（UI 线程用）。

@@ -7,8 +7,14 @@ use eframe::egui;
 
 const IOS_OS_POOL: [&str; 5] = ["17.5.1", "18.0.1", "18.1", "18.2", "26.5.2"];
 const ANDROID_MODEL_POOL: [&str; 8] = [
-    "22081212C", "OPPO PGBM10", "Redmi K60", "HUAWEI Mate 40", "vivo V2309A",
-    "Pixel 8", "SM-S9210", "OnePlus ACE3",
+    "22081212C",
+    "OPPO PGBM10",
+    "Redmi K60",
+    "HUAWEI Mate 40",
+    "vivo V2309A",
+    "Pixel 8",
+    "SM-S9210",
+    "OnePlus ACE3",
 ];
 const ANDROID_OS_POOL: [&str; 4] = ["12", "13", "14", "15"];
 
@@ -20,16 +26,25 @@ pub struct DevicePage {
 impl App {
     #[cfg(target_os = "android")]
     pub(super) fn poll_device_info(&mut self) {
-        let Some(reply) = crate::android::take_device_info() else { return };
+        let Some(reply) = crate::android::take_device_info() else {
+            return;
+        };
         let info = match reply.result {
             Ok(Some(info)) => info,
             Ok(None) => {
                 self.status = "未读取本机信息，可在设备信息页手动填写或再次读取".into();
                 return;
             }
-            Err(error) => { self.status = format!("× {error}"); return; }
+            Err(error) => {
+                self.status = format!("× {error}");
+                return;
+            }
         };
-        let identity = if reply.initial { &self.identity } else { &self.device_buf };
+        let identity = if reply.initial {
+            &self.identity
+        } else {
+            &self.device_buf
+        };
         match crate::api::model::identity_with_device_info(identity, &info) {
             Ok(updated) => {
                 self.device_buf = updated;
@@ -38,8 +53,10 @@ impl App {
                         Ok(()) => {
                             self.identity = self.device_buf.clone();
                             crate::android::complete_device_info();
-                            self.status = format!("已读取 {} {} / Android {}；UUID 保持不变",
-                                info.manufacturer, info.model, info.os_version);
+                            self.status = format!(
+                                "已读取 {} {} / Android {}；UUID 保持不变",
+                                info.manufacturer, info.model, info.os_version
+                            );
                         }
                         Err(error) => {
                             self.tab = 5;
@@ -47,7 +64,10 @@ impl App {
                         }
                     }
                 } else {
-                    self.status = format!("已读取 {} {}；点击保存后生效，UUID 保持不变", info.manufacturer, info.model);
+                    self.status = format!(
+                        "已读取 {} {}；点击保存后生效，UUID 保持不变",
+                        info.manufacturer, info.model
+                    );
                 }
             }
             Err(error) => self.status = format!("× {error}"),
@@ -67,7 +87,11 @@ impl App {
 
         mobile::row(ui, |ui| {
             ui.radio_value(&mut self.device_buf.platform, "ios".to_string(), "iOS");
-            ui.radio_value(&mut self.device_buf.platform, "android".to_string(), "Android");
+            ui.radio_value(
+                &mut self.device_buf.platform,
+                "android".to_string(),
+                "Android",
+            );
             ui.separator();
             let platform = self.device_buf.platform.clone();
             if ui.button("随机生成").clicked() {
@@ -83,29 +107,87 @@ impl App {
 
         ui.add_space(6.0);
         let is_ios = self.device_buf.platform != "android";
-        let id_label = if is_ios { "DeviceId（UUID 大写）" } else { "DeviceId（Android）" };
-        let idfa_label = if is_ios { "IDFA（可空）" } else { "IMEI（可空）" };
+        let id_label = if is_ios {
+            "DeviceId（UUID 大写）"
+        } else {
+            "DeviceId（Android）"
+        };
+        let idfa_label = if is_ios {
+            "IDFA（可空）"
+        } else {
+            "IMEI（可空）"
+        };
         let name_label = if is_ios { "设备名" } else { "机型" };
         if mobile::compact_ui(ui) {
             ui.vertical(|ui| {
                 ui.label(id_label);
-                mobile::text_edit(ui, "device_id", &mut self.device_buf.device_id, crate::platform::InputKind::Text, ui.available_width());
+                mobile::text_edit(
+                    ui,
+                    "device_id",
+                    &mut self.device_buf.device_id,
+                    crate::platform::InputKind::Text,
+                    ui.available_width(),
+                );
                 ui.label(idfa_label);
-                mobile::text_edit(ui, "device_idfa", &mut self.device_buf.idfa, crate::platform::InputKind::Text, ui.available_width());
+                mobile::text_edit(
+                    ui,
+                    "device_idfa",
+                    &mut self.device_buf.idfa,
+                    crate::platform::InputKind::Text,
+                    ui.available_width(),
+                );
                 ui.label("系统版本：");
-                mobile::text_edit(ui, "device_os", &mut self.device_buf.os_version, crate::platform::InputKind::Text, ui.available_width());
+                mobile::text_edit(
+                    ui,
+                    "device_os",
+                    &mut self.device_buf.os_version,
+                    crate::platform::InputKind::Text,
+                    ui.available_width(),
+                );
                 ui.label(name_label);
-                mobile::text_edit(ui, "device_name", &mut self.device_buf.device_name, crate::platform::InputKind::Text, ui.available_width());
+                mobile::text_edit(
+                    ui,
+                    "device_name",
+                    &mut self.device_buf.device_name,
+                    crate::platform::InputKind::Text,
+                    ui.available_width(),
+                );
                 if !is_ios {
                     ui.label("品牌（本地展示，可空）：");
-                    mobile::text_edit(ui, "device_manufacturer", &mut self.device_buf.manufacturer, crate::platform::InputKind::Text, ui.available_width());
+                    mobile::text_edit(
+                        ui,
+                        "device_manufacturer",
+                        &mut self.device_buf.manufacturer,
+                        crate::platform::InputKind::Text,
+                        ui.available_width(),
+                    );
                 }
                 ui.label("城市：");
-                mobile::text_edit(ui, "device_city", &mut self.device_buf.city, crate::platform::InputKind::Text, ui.available_width());
+                mobile::text_edit(
+                    ui,
+                    "device_city",
+                    &mut self.device_buf.city,
+                    crate::platform::InputKind::Text,
+                    ui.available_width(),
+                );
                 ui.label("定位锚点纬度：");
-                mobile::drag_f64(ui, "device_lat", &mut self.device_buf.anchor_lat, -90.0..=90.0, 0.00001, 6);
+                mobile::drag_f64(
+                    ui,
+                    "device_lat",
+                    &mut self.device_buf.anchor_lat,
+                    -90.0..=90.0,
+                    0.00001,
+                    6,
+                );
                 ui.label("定位锚点经度：");
-                mobile::drag_f64(ui, "device_lon", &mut self.device_buf.anchor_lon, -180.0..=180.0, 0.00001, 6);
+                mobile::drag_f64(
+                    ui,
+                    "device_lon",
+                    &mut self.device_buf.anchor_lon,
+                    -180.0..=180.0,
+                    0.00001,
+                    6,
+                );
             });
         } else {
             egui::Grid::new("device_grid")
@@ -113,48 +195,82 @@ impl App {
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
                     ui.label(id_label);
-                    mobile::text_edit(ui, "device_id", &mut self.device_buf.device_id, crate::platform::InputKind::Text, 340.0);
+                    mobile::text_edit(
+                        ui,
+                        "device_id",
+                        &mut self.device_buf.device_id,
+                        crate::platform::InputKind::Text,
+                        340.0,
+                    );
                     ui.end_row();
                     ui.label(idfa_label);
-                    mobile::text_edit(ui, "device_idfa", &mut self.device_buf.idfa, crate::platform::InputKind::Text, 340.0);
+                    mobile::text_edit(
+                        ui,
+                        "device_idfa",
+                        &mut self.device_buf.idfa,
+                        crate::platform::InputKind::Text,
+                        340.0,
+                    );
                     ui.end_row();
                     ui.label("系统版本：");
-                    mobile::text_edit(ui, "device_os", &mut self.device_buf.os_version, crate::platform::InputKind::Text, 120.0);
+                    mobile::text_edit(
+                        ui,
+                        "device_os",
+                        &mut self.device_buf.os_version,
+                        crate::platform::InputKind::Text,
+                        120.0,
+                    );
                     ui.end_row();
                     ui.label(name_label);
-                    mobile::text_edit(ui, "device_name", &mut self.device_buf.device_name, crate::platform::InputKind::Text, 200.0);
+                    mobile::text_edit(
+                        ui,
+                        "device_name",
+                        &mut self.device_buf.device_name,
+                        crate::platform::InputKind::Text,
+                        200.0,
+                    );
                     ui.end_row();
                     if !is_ios {
                         ui.label("品牌（本地展示，可空）：");
-                        mobile::text_edit(ui, "device_manufacturer", &mut self.device_buf.manufacturer, crate::platform::InputKind::Text, 200.0);
+                        mobile::text_edit(
+                            ui,
+                            "device_manufacturer",
+                            &mut self.device_buf.manufacturer,
+                            crate::platform::InputKind::Text,
+                            200.0,
+                        );
                         ui.end_row();
                     }
                     ui.label("城市：");
-                    mobile::text_edit(ui, "device_city", &mut self.device_buf.city, crate::platform::InputKind::Text, 120.0);
+                    mobile::text_edit(
+                        ui,
+                        "device_city",
+                        &mut self.device_buf.city,
+                        crate::platform::InputKind::Text,
+                        120.0,
+                    );
                     ui.end_row();
                     ui.label("定位锚点纬度：");
-                    mobile::drag_f64(ui, "device_lat", &mut self.device_buf.anchor_lat, -90.0..=90.0, 0.00001, 6);
+                    mobile::drag_f64(
+                        ui,
+                        "device_lat",
+                        &mut self.device_buf.anchor_lat,
+                        -90.0..=90.0,
+                        0.00001,
+                        6,
+                    );
                     ui.end_row();
                     ui.label("定位锚点经度：");
-                    mobile::drag_f64(ui, "device_lon", &mut self.device_buf.anchor_lon, -180.0..=180.0, 0.00001, 6);
+                    mobile::drag_f64(
+                        ui,
+                        "device_lon",
+                        &mut self.device_buf.anchor_lon,
+                        -180.0..=180.0,
+                        0.00001,
+                        6,
+                    );
                     ui.end_row();
                 });
-        }
-
-        ui.add_space(4.0);
-        ui.colored_label(
-            theme::text_dim(),
-            "定位锚点填写顺序：先填纬度，再填经度；地图常见的“经度,纬度”格式需要调换后填写。",
-        );
-        ui.colored_label(
-            theme::text_dim(),
-            "修改城市或定位锚点后，请点击“保存”；跑步流程只使用已保存的身份信息。",
-        );
-        if location_fields_changed(&self.identity, &self.device_buf) {
-            ui.colored_label(
-                theme::warn(),
-                "检测到城市或定位锚点有未保存修改，当前跑步仍会使用上次保存的值。",
-            );
         }
 
         ui.add_space(8.0);
@@ -191,7 +307,11 @@ impl App {
         ui.add_space(4.0);
         ui.label(format!(
             "当前生效身份：{} / {} / {} / 城市 {} / 锚点({:.6},{:.6})",
-            if self.identity.platform == "android" { "Android" } else { "iOS" },
+            if self.identity.platform == "android" {
+                "Android"
+            } else {
+                "iOS"
+            },
             self.identity.device_name,
             self.identity.os_version,
             self.identity.city,
@@ -211,12 +331,6 @@ impl App {
             ui.label(format!("当前保存品牌：{}", self.identity.manufacturer));
         }
     }
-}
-
-fn location_fields_changed(saved: &HeaderIdentity, pending: &HeaderIdentity) -> bool {
-    saved.city.trim() != pending.city.trim()
-        || (saved.anchor_lat - pending.anchor_lat).abs() > 1e-9
-        || (saved.anchor_lon - pending.anchor_lon).abs() > 1e-9
 }
 
 /// 整套随机：uuid v4 设备 ID（大写）；机型/系统按平台池抽取。
@@ -247,20 +361,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn location_changes_are_detected_until_saved() {
-        let saved = HeaderIdentity::default();
-        let mut pending = saved.clone();
-        assert!(!location_fields_changed(&saved, &pending));
-
-        pending.city = "北京市".into();
-        assert!(location_fields_changed(&saved, &pending));
-
-        pending = saved.clone();
-        pending.anchor_lat += 0.000001;
-        assert!(location_fields_changed(&saved, &pending));
-    }
-
-    #[test]
     fn random_device_does_not_keep_a_previously_imported_brand() {
         for platform in ["android", "ios"] {
             let mut identity = HeaderIdentity {
@@ -268,7 +368,10 @@ mod tests {
                 ..Default::default()
             };
             randomize(&mut identity, platform);
-            assert!(identity.manufacturer.is_empty(), "random {platform} identity must not retain a different device's brand");
+            assert!(
+                identity.manufacturer.is_empty(),
+                "random {platform} identity must not retain a different device's brand"
+            );
         }
     }
 }

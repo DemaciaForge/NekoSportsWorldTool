@@ -2,9 +2,8 @@
 
 use super::about::FinishAction;
 use super::{
-    App, PopupInfo, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE,
-    POINTS_DONE, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, UPDATE_CHK, UPDATE_DONE,
-    UPDATE_PROG, USER,
+    App, PopupInfo, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, IP, LOGIN_DONE, RANK, RECORDS,
+    RUN_DETAIL, RUN_DONE, SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER,
 };
 use crate::api::model;
 use chrono::TimeZone;
@@ -15,8 +14,6 @@ impl App {
         let mut done_login = None;
         let mut done_run = None;
         let mut done_ai = None;
-        let mut done_fence = false;
-        let mut done_points = false;
         let mut records_json = None;
         let mut ai_list_json = None;
         let mut semester_json = None;
@@ -32,10 +29,6 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             if let Some(v) = msg.strip_prefix(IP) {
                 done_ip = Some(v.to_string());
-            } else if msg == FENCE_DONE {
-                done_fence = true;
-            } else if msg == POINTS_DONE {
-                done_points = true;
             } else if let Some(v) = msg.strip_prefix(LOGIN_DONE) {
                 done_login = Some(v.to_string());
             } else if let Some(v) = msg.strip_prefix(RUN_DONE) {
@@ -81,34 +74,8 @@ impl App {
         let got_semester = semester_json.is_some();
         let got_cheat = cheat_json.is_some();
         let got_rank = rank_json.is_some();
-
-        // OSM 路网加载回传
-        while let Ok(res) = self.net_rx.try_recv() {
-            self.osm_page.busy = false;
-            match res {
-                Ok(net) => {
-                    let nodes = net.graph.node_count();
-                    let bld = net.buildings.len();
-                    self.osm_page.fitted = false;
-                    self.osm_page.status = format!("√ 路网加载成功：{nodes} 节点 / {bld} 建筑");
-                    self.log
-                        .push(&format!("[osm] 路网加载成功：{nodes} 节点 / {bld} 建筑"));
-                    self.network = Some(net);
-                }
-                Err(e) => {
-                    self.osm_page.status = format!("路网加载失败：{e}");
-                    self.log.push(&format!("[osm] 路网加载失败：{e}"));
-                }
-            }
-        }
         if let Some(ip) = done_ip {
             self.ip = ip;
-        }
-        if done_fence {
-            self.run_page.preview_stale = true;
-        }
-        if done_points {
-            self.run_page.preview_stale = true;
         }
         if let Some(v) = done_login {
             self.login_busy = false;
@@ -148,7 +115,6 @@ impl App {
                 self.refresh_records();
                 self.refresh_user_page();
                 self.refresh_ai_list();
-                self.refresh_fence();
             } else {
                 self.status = format!(
                     "登录失败：{}",
@@ -161,16 +127,23 @@ impl App {
             let val: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
             if val.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
                 self.status = format!(
-                    "跑步提交成功 rrid={}（OBS {}/2）",
+                    "跑步提交成功 rrid={}（OBS 上传 {}/2，回读={}，详情={}，complete={}）",
                     val["rrid"].as_i64().unwrap_or(0),
-                    val["obs_ok"].as_i64().unwrap_or(0)
+                    val["obs_upload"].as_i64().unwrap_or(0),
+                    if val["obs_roundtrip"].as_bool().unwrap_or(false) {
+                        "通过"
+                    } else {
+                        "失败"
+                    },
+                    if val["detail_request"].as_bool().unwrap_or(false) {
+                        "成功"
+                    } else {
+                        "失败"
+                    },
+                    val["detail_complete"].as_bool().unwrap_or(false),
                 );
                 self.popup = Some(run_popup(&val));
                 self.refresh_data_page();
-                // 提交末尾会随机漂移锚点并持久化，这里重载身份让 UI 锚点与磁盘一致，
-                // 并触发路线预览重算（点位缓存已在漂移后用新锚点重存）。
-                self.identity = model::load_identity();
-                self.run_page.preview_stale = true;
             } else {
                 self.status = format!("跑步提交失败：{}", val["message"].as_str().unwrap_or(""));
             }
@@ -392,9 +365,20 @@ fn run_popup(v: &serde_json::Value) -> PopupInfo {
         ),
         format!("开始时间：{}", fmt_hms(v["start"].as_i64().unwrap_or(0))),
         format!(
-            "OBS 上传：{}/2 · 详情验证：{}",
-            v["obs_ok"].as_i64().unwrap_or(0),
-            if v["verify"].as_bool().unwrap_or(false) {
+            "OBS 上传：{}/2 · 回读：{} · 详情请求：{} · complete={} · 详情判定项通过：{}",
+            v["obs_upload"].as_i64().unwrap_or(0),
+            if v["obs_roundtrip"].as_bool().unwrap_or(false) {
+                "通过"
+            } else {
+                "失败"
+            },
+            if v["detail_request"].as_bool().unwrap_or(false) {
+                "成功"
+            } else {
+                "失败"
+            },
+            v["detail_complete"].as_bool().unwrap_or(false),
+            if v["detail_checks_passed"].as_bool().unwrap_or(false) {
                 "通过"
             } else {
                 "未通过"

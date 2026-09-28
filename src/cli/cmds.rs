@@ -89,10 +89,31 @@ fn cmd_run(rest: &[&str]) -> i32 {
             return 1;
         }
     };
-    let dist_km: f32 = get(&flags, "dist")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.0);
-    let pace: f32 = get(&flags, "pace").map(parse_pace).unwrap_or(0.0);
+    // Keep explicit values bounded before they reach the point generator.  A
+    // non-finite or enormous distance would otherwise turn into a huge number
+    // of sampled points and can exhaust memory/CPU.
+    let dist_km = match get(&flags, "dist") {
+        None => 0.0,
+        Some(value) => match value.parse::<f32>() {
+            Ok(value) if value.is_finite() && value > 0.0 && value <= 50.0 => value,
+            _ => {
+                eprintln!("--dist 必须是大于 0 且不超过 50 km 的有限数值");
+                return 1;
+            }
+        },
+    };
+    let pace = match get(&flags, "pace") {
+        None => 0.0,
+        Some(value) => {
+            let pace = parse_pace(value);
+            if pace.is_finite() && pace > 0.0 && pace <= 1200.0 {
+                pace
+            } else {
+                eprintln!("--pace 必须是大于 0 且不超过 1200 秒/km 的有限数值");
+                return 1;
+            }
+        }
+    };
     let ago_min: i64 = get(&flags, "ago").and_then(|v| v.parse().ok()).unwrap_or(0);
     let days_ago: i64 = get(&flags, "days-ago")
         .and_then(|v| v.parse().ok())
@@ -114,6 +135,36 @@ fn cmd_run(rest: &[&str]) -> i32 {
         },
         None => (None, None),
     };
+    let track_color_mode = match get(&flags, "track-color") {
+        None => crate::api::model::TrackColorMode::FullGreen,
+        Some("mixed") | Some("gray") | Some("grey") | Some("half-green-gray") => {
+            crate::api::model::TrackColorMode::HalfGreenGray
+        }
+        Some("green") | Some("full-green") | Some("full_green") => {
+            crate::api::model::TrackColorMode::FullGreen
+        }
+        Some(value) => {
+            eprintln!("--track-color 必须是 full-green 或 half-green-gray（收到 {value}）");
+            return 1;
+        }
+    };
+    let custom_track_length = get(&flags, "track-length").and_then(|v| v.parse::<u32>().ok());
+    if get(&flags, "track-length").is_some() && custom_track_length.is_none() {
+        eprintln!("--track-length 必须是 100-1000 米之间的整数");
+        return 1;
+    }
+    let track_spec = match get(&flags, "track-spec") {
+        None => crate::track::stadium::TrackSpec::Auto,
+        Some(value) => {
+            match crate::track::stadium::TrackSpec::parse_with_length(value, custom_track_length) {
+                Some(spec) => spec,
+                None => {
+                    eprintln!("--track-spec 必须是 auto、200、300、400 或 custom（也接受 200m/300m/400m；custom 需同时提供 --track-length 100-1000）");
+                    return 1;
+                }
+            }
+        }
+    };
     let seed: u64 = get(&flags, "seed")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
@@ -122,10 +173,6 @@ fn cmd_run(rest: &[&str]) -> i32 {
     } else {
         seed
     };
-    let cfg = model::load_config();
-    let route_mode = crate::track::generate_road::RouteMode::from_str(
-        get(&flags, "route").unwrap_or(&cfg.route_mode),
-    );
 
     let dist = if dist_km > 0.0 {
         dist_km as f64 * 1000.0
@@ -175,17 +222,21 @@ fn cmd_run(rest: &[&str]) -> i32 {
         face_check: face as i64,
         manual_altitude,
         manual_altitude_range,
+        track_color_mode,
+        track_spec,
         seed,
-        route_mode,
     };
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {
             println!(
-                "跑步提交成功 rrid={} uuid={} obs={}/2 verify={}",
+                "跑步提交成功 rrid={} uuid={} obs_upload={}/2 obs_roundtrip={} detail_request={} detail_complete={} detail_checks_passed={}",
                 out.result.rrid,
                 out.result.uuid,
-                out.obs_ok,
-                if out.detail_ok { "通过" } else { "未通过" }
+                out.obs_upload,
+                out.obs_roundtrip,
+                out.detail_request,
+                out.detail_complete,
+                out.detail_checks_passed,
             );
             0
         }
@@ -342,17 +393,14 @@ fn cmd_records_raw(rest: &[&str]) -> i32 {
             } else if n > 0 {
                 println!(
                     "首条: {}",
-                    &arr[0].to_string()[..arr[0].to_string().len().min(300)]
+                    crate::textlog::truncate(&arr[0].to_string(), 300)
                 );
                 println!(
                     "末条: {}",
-                    &arr[n - 1].to_string()[..arr[n - 1].to_string().len().min(300)]
+                    crate::textlog::truncate(&arr[n - 1].to_string(), 300)
                 );
             } else {
-                println!(
-                    "data: {}",
-                    data.to_string()[..data.to_string().len().min(500)].to_string()
-                );
+                println!("data: {}", crate::textlog::truncate(&data.to_string(), 500));
             }
             0
         }

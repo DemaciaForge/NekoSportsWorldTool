@@ -66,7 +66,7 @@ fn parse_f64_in_range(input: &str, range: RangeInclusive<f64>) -> Result<f64, St
 }
 
 pub fn tab_bar(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response> {
-    const TABS: [&str; 9] = [
+    const TABS: [&str; 8] = [
         "跑步",
         "AI运动",
         "运动记录",
@@ -74,7 +74,6 @@ pub fn tab_bar(ui: &mut egui::Ui, selected: &mut usize) -> Vec<egui::Response> {
         "我的",
         "设备信息",
         "运行日志",
-        "路网",
         "关于",
     ];
     let compact = compact_ui(ui);
@@ -380,7 +379,7 @@ mod tests {
                 });
             });
 
-            assert_eq!(rects.len(), 9, "width={width}");
+            assert_eq!(rects.len(), 8, "width={width}");
             assert!(rects
                 .iter()
                 .all(|rect| rect.is_finite() && rect.width() > 0.0));

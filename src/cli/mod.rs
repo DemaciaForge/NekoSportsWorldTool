@@ -21,8 +21,8 @@ fn usage() {
   login   --user <手机号> --pass <密码> [--remember]
                                            登录并保存会话；--remember 同时保存凭据供自动重登
   logout                                   登出并清理本地会话
-  run    [--dist km] [--pace 秒/km] [--altitude 米或min-max] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n] [--route legacy|road]
-                                           跑步全链：策略-点位-轨迹-提交-OBS-验证（--route 选择路线算法）
+  run    [--dist km] [--pace 秒/km] [--altitude 米或min-max] [--track-color full-green|half-green-gray] [--track-spec auto|200|300|400|custom --track-length 100-1000] [--ago 分钟] [--days-ago 0-3 --time HH:MM] [--face 0|1] [--seed n]
+                                           跑步全链：策略-点位-轨迹-提交-OBS-验证
   template --file <GPX/JSON>                本地读取真实记录，分析海拔（不会上传）
   ai-list                                  AI 运动项目列表
   ai     --sport <id> [--mode min|count] [--score n]
@@ -128,7 +128,8 @@ pub(crate) fn print_rows(rows: &[RecordRow]) {
         "时间", "距离m", "时长", "配速", "步频", "达标"
     );
     for r in rows {
-        let t = fmt_hms(r.start_time)[5..].to_string();
+        let formatted = fmt_hms(r.start_time);
+        let t = formatted.get(5..).unwrap_or("-");
         let pace = if r.total_dis > 0.0 && r.total_time > 0 {
             let p = r.total_time as f64 / (r.total_dis / 1000.0);
             format!("{}:{:02}", (p / 60.0) as i64, (p as i64) % 60)

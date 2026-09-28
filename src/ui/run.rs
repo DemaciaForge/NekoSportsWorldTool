@@ -4,9 +4,7 @@
 //! 内抽样，并保证「开始 + 用时」不越过当前时刻；指定模式完全按用户填写的时/分
 //! （尚未到达时按当前时刻），「换一版」只重掷运动量，不动时刻。
 
-use super::map::MapState;
 use super::{mobile, theme, App};
-use crate::track::generate_road::RouteMode;
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike};
 use eframe::egui;
 
@@ -67,8 +65,16 @@ pub struct RunPage {
     pub dist_max: f32,
     pub pace_min: f32,
     pub pace_max: f32,
-    /// 手动绝对海拔（米）；空白表示使用生成器默认海拔。
-    pub manual_altitude: String,
+    /// 手动海拔范围最低值；与最高值同时为空表示使用生成器默认海拔。
+    pub manual_altitude_min: String,
+    /// 手动海拔范围最高值。
+    pub manual_altitude_max: String,
+    /// Route display preference requested by the user.
+    pub track_color_mode: crate::api::model::TrackColorMode,
+    /// Standard school track preset, or automatic server-fence fitting.
+    pub track_spec: crate::api::model::TrackSpec,
+    /// Custom oval measurement-line length, kept as text for mobile editing.
+    pub custom_track_length: String,
     /// 0=随机时刻 1=指定时刻
     pub start_mode: usize,
     pub days_ago: i64,
@@ -77,16 +83,6 @@ pub struct RunPage {
     pub face_check: bool,
     /// 预计算方案：参数变更时重抽样，提交直接使用
     pub plan: Option<RunPlan>,
-    /// 路线算法模式
-    pub route_mode: RouteMode,
-    /// 地图视图状态
-    pub map: MapState,
-    /// 路网预览（真实道路路由）
-    pub preview: Option<crate::track::generate_road::RoadPlan>,
-    /// 预览是否过期（参数变更后置真）
-    pub preview_stale: bool,
-    /// 地图视野是否已适配
-    pub map_fitted: bool,
 }
 
 /// 一次提交的确定方案（进入页面/参数变更时抽样生成）。
@@ -107,8 +103,6 @@ pub struct RunPlan {
     /// 秒
     pub dur: i64,
     pub start_ms: i64,
-    /// 本次方案的随机种子（预览与提交共用，保证所见即所得）
-    pub seed: u64,
 }
 
 impl RunPage {
@@ -210,9 +204,7 @@ impl RunPage {
             pace,
             dur,
             start_ms,
-            seed: rand::random::<u64>(),
         });
-        self.preview_stale = true;
     }
 
     /// 「换一版」：重掷运动量；随机模式下同时换一个开始时刻。
@@ -267,7 +259,6 @@ impl App {
     }
 
     fn draw_run_content(&mut self, ui: &mut egui::Ui) {
-        let prev_route = self.run_page.route_mode;
         {
             let page = &mut self.run_page;
             let compact = mobile::compact_ui(ui);
@@ -332,15 +323,89 @@ impl App {
                 });
             }
             mobile::row(ui, |ui| {
-                ui.label("手动海拔（米/区间）：");
+                ui.label("海拔范围（米）：");
+                ui.label("最低");
                 mobile::text_edit(
                     ui,
-                    "run_manual_altitude",
-                    &mut page.manual_altitude,
+                    "run_manual_altitude_min",
+                    &mut page.manual_altitude_min,
                     crate::platform::InputKind::Text,
-                    120.0,
+                    80.0,
                 );
-                ui.label("留空自动；可填 17.2 或 11.6-22.8");
+                ui.label("-");
+                ui.label("最高");
+                mobile::text_edit(
+                    ui,
+                    "run_manual_altitude_max",
+                    &mut page.manual_altitude_max,
+                    crate::platform::InputKind::Text,
+                    80.0,
+                );
+                ui.label("留空自动");
+            });
+            mobile::row(ui, |ui| {
+                ui.label("轨迹颜色：");
+                ui.radio_value(
+                    &mut page.track_color_mode,
+                    crate::api::model::TrackColorMode::FullGreen,
+                    "全绿色",
+                );
+                ui.radio_value(
+                    &mut page.track_color_mode,
+                    crate::api::model::TrackColorMode::HalfGreenGray,
+                    "绿灰兼容",
+                );
+            });
+            mobile::row(ui, |ui| {
+                ui.label("操场规格：");
+                egui::ComboBox::from_id_salt("run_track_spec")
+                    .width(170.0)
+                    .selected_text(match page.track_spec {
+                        crate::api::model::TrackSpec::Custom { total_m } => {
+                            format!("自定义 {} 米", total_m)
+                        }
+                        spec => spec.label().to_string(),
+                    })
+                    .show_ui(ui, |ui| {
+                        for spec in [
+                            crate::api::model::TrackSpec::Auto,
+                            crate::api::model::TrackSpec::M200,
+                            crate::api::model::TrackSpec::M300,
+                            crate::api::model::TrackSpec::M400,
+                        ] {
+                            ui.selectable_value(&mut page.track_spec, spec, spec.label());
+                        }
+                        let custom_length = page
+                            .custom_track_length
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|length| (100..=1000).contains(length))
+                            .unwrap_or(400);
+                        ui.selectable_value(
+                            &mut page.track_spec,
+                            crate::api::model::TrackSpec::Custom {
+                                total_m: custom_length,
+                            },
+                            format!("自定义 {} 米", custom_length),
+                        );
+                    });
+                if matches!(page.track_spec, crate::api::model::TrackSpec::Custom { .. }) {
+                    ui.label("长度");
+                    mobile::text_edit(
+                        ui,
+                        "run_custom_track_length",
+                        &mut page.custom_track_length,
+                        crate::platform::InputKind::Text,
+                        70.0,
+                    );
+                    if let Ok(length) = page.custom_track_length.parse::<u32>() {
+                        if (100..=1000).contains(&length) {
+                            page.track_spec =
+                                crate::api::model::TrackSpec::Custom { total_m: length };
+                        }
+                    }
+                    ui.label("100-1000 米");
+                }
             });
             mobile::row(ui, |ui| {
                 ui.label("开始时间：");
@@ -390,20 +455,6 @@ impl App {
                 ui.label("人脸校验标记：");
                 ui.checkbox(&mut page.face_check, "faceCheck=1");
             });
-            ui.horizontal(|ui| {
-                ui.label("路线算法：");
-                ui.selectable_value(&mut page.route_mode, RouteMode::Legacy, "经典打卡点环");
-                ui.selectable_value(&mut page.route_mode, RouteMode::Road, "真实道路路由");
-                if page.route_mode == RouteMode::Road && self.network.is_none() {
-                    ui.colored_label(theme::warn(), "（需先在「路网」页导入 OSM）");
-                }
-            });
-        }
-
-        // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
-        if self.run_page.route_mode == RouteMode::Road && prev_route != RouteMode::Road {
-            self.refresh_fence();
-            self.refresh_points();
         }
 
         ui.add_space(8.0);
@@ -440,8 +491,6 @@ impl App {
                 self.run_page.regen_plan();
             }
         });
-
-        self.draw_run_map(ui);
 
         ui.add_space(8.0);
         let enabled = !self.run_busy && self.session.is_some();
@@ -496,193 +545,6 @@ impl App {
         }
     }
 
-    fn draw_run_map(&mut self, ui: &mut egui::Ui) {
-        if self.run_page.route_mode != RouteMode::Road {
-            return;
-        }
-        let Some(net) = self.network.clone() else {
-            ui.colored_label(
-                theme::warn(),
-                "未加载 OSM 路网，无法预览（请先到「路网」页导入）",
-            );
-            return;
-        };
-        let Some(plan) = self.run_page.plan.clone() else {
-            return;
-        };
-
-        if self.run_page.preview_stale {
-            self.run_page.preview = None;
-            self.run_page.map_fitted = false;
-            self.run_page.preview_stale = false;
-            // 点位缓存按锚点隔离（main 的串城市防护）；锚点无效时视为无缓存
-            let cached = self
-                .identity
-                .anchor_coordinate()
-                .ok()
-                .and_then(crate::api::model::load_points_cache_for);
-            if let Some((_ts, pts)) = cached {
-                let pts_bd = crate::api::points::points_bd(&pts);
-                if !pts_bd.is_empty() {
-                    let fences = crate::api::model::load_fence_cache().unwrap_or_default();
-                    match crate::track::generate_road::plan_road_view(
-                        &net,
-                        &pts_bd,
-                        plan.dist * 1000.0,
-                        plan.seed,
-                        &fences,
-                    ) {
-                        Ok(p) => self.run_page.preview = Some(p),
-                        Err(e) => self.status = format!("路线预览失败：{e}"),
-                    }
-                } else {
-                    self.status = "无打卡点缓存，提交后可回显轨迹".into();
-                }
-            } else {
-                self.status = "无打卡点缓存，提交后可回显轨迹".into();
-            }
-        }
-
-        if self.run_page.preview.is_some() {
-            super::map::legend(
-                ui,
-                &[
-                    ("道路", egui::Color32::from_rgb(200, 208, 204)),
-                    ("建筑", egui::Color32::from_rgb(224, 194, 170)),
-                    ("路线", egui::Color32::from_rgb(30, 111, 216)),
-                    ("打卡点", egui::Color32::from_rgb(240, 180, 0)),
-                    ("起点", egui::Color32::from_rgb(22, 160, 90)),
-                    ("终点", egui::Color32::from_rgb(220, 38, 38)),
-                ],
-            );
-        }
-
-        ui.add_space(4.0);
-        let rect = ui.available_rect_before_wrap();
-        let (response, painter) = ui.allocate_painter(
-            egui::Vec2::new(rect.width().max(200.0), 240.0),
-            egui::Sense::drag(),
-        );
-        let canvas = response.rect;
-        painter.rect_filled(
-            canvas,
-            egui::Rounding::ZERO,
-            egui::Color32::from_rgb(250, 252, 251),
-        );
-
-        // 首次预览后适配视野：优先以电子围栏为中点/范围，无围栏时退化为路线+打卡点+道路
-        if !self.run_page.map_fitted {
-            let mut bounds: Vec<(f64, f64)> = Vec::new();
-            if let Some(p) = &self.run_page.preview {
-                for f in &p.fences {
-                    bounds.extend(f.iter().copied());
-                }
-                if bounds.is_empty() {
-                    bounds = super::map::collect_bounds(&p.edges);
-                    bounds.extend(p.route.iter().copied());
-                    bounds.extend(p.checkpoints.iter().copied());
-                }
-            }
-            if !bounds.is_empty() {
-                self.run_page.map.fit(canvas, &bounds);
-                self.run_page.map_fitted = true;
-            }
-        }
-
-        if let Some(p) = &self.run_page.preview {
-            let road = egui::Color32::from_rgb(200, 208, 204);
-            for e in &p.edges {
-                self.run_page
-                    .map
-                    .draw_polyline(&painter, canvas, e, road, 1.0);
-            }
-            let bld = egui::Color32::from_rgb(224, 194, 170);
-            for b in &p.buildings {
-                self.run_page
-                    .map
-                    .draw_polygon(&painter, canvas, b, bld, 1.0);
-            }
-            let fence_c = egui::Color32::from_rgb(180, 118, 0);
-            for f in &p.fences {
-                self.run_page
-                    .map
-                    .draw_polygon(&painter, canvas, f, fence_c, 2.0);
-            }
-            let route_c = egui::Color32::from_rgb(30, 111, 216);
-            self.run_page
-                .map
-                .draw_polyline(&painter, canvas, &p.route, route_c, 2.5);
-            let cp = egui::Color32::from_rgb(240, 180, 0);
-            for &(la, lo) in &p.checkpoints {
-                self.run_page
-                    .map
-                    .draw_point(&painter, canvas, la, lo, cp, 3.5);
-            }
-            if let Some(first) = p.route.first() {
-                self.run_page.map.draw_point(
-                    &painter,
-                    canvas,
-                    first.0,
-                    first.1,
-                    egui::Color32::from_rgb(22, 160, 90),
-                    4.5,
-                );
-            }
-            if let Some(last) = p.route.last() {
-                self.run_page.map.draw_point(
-                    &painter,
-                    canvas,
-                    last.0,
-                    last.1,
-                    egui::Color32::from_rgb(220, 38, 38),
-                    4.5,
-                );
-            }
-            let label = if p.length_m > 0.0 {
-                let loops = plan.dist * 1000.0 / p.length_m;
-                if loops > 1.15 {
-                    format!(
-                        "本次方案 {:.2} km · 单圈 {:.0} m × {:.1} 圈 · {} 打卡点",
-                        plan.dist,
-                        p.length_m,
-                        loops,
-                        p.checkpoints.len()
-                    )
-                } else {
-                    format!(
-                        "本次方案 {:.2} km · 路线 {:.0} m · {} 打卡点",
-                        plan.dist,
-                        p.length_m,
-                        p.checkpoints.len()
-                    )
-                }
-            } else {
-                format!(
-                    "本次方案 {:.2} km · {} 打卡点",
-                    plan.dist,
-                    p.checkpoints.len()
-                )
-            };
-            painter.text(
-                egui::Pos2::new(canvas.left() + 8.0, canvas.top() + 8.0),
-                egui::Align2::LEFT_TOP,
-                label,
-                egui::FontId::proportional(12.0),
-                egui::Color32::from_rgb(88, 104, 99),
-            );
-        } else {
-            painter.text(
-                canvas.center(),
-                egui::Align2::CENTER_CENTER,
-                "（无预览）",
-                egui::FontId::proportional(14.0),
-                egui::Color32::from_rgb(150, 160, 156),
-            );
-        }
-
-        self.run_page.map.interact(ui, canvas);
-    }
-
     fn start_run(&mut self) {
         // 参数变更时补齐方案；提交直接使用预计算值
         self.run_page.ensure_plan();
@@ -691,22 +553,20 @@ impl App {
             Some(p) => p,
             None => return,
         };
-        let altitude_spec = match crate::track::altitude::parse_spec(&page.manual_altitude) {
-            Ok(spec) => spec,
+        let manual_altitude_range = match crate::track::altitude::parse_range_fields(
+            &page.manual_altitude_min,
+            &page.manual_altitude_max,
+        ) {
+            Ok(range) => range,
             Err(e) => {
                 self.status = e;
                 return;
             }
         };
-        let (manual_altitude, manual_altitude_range) = match altitude_spec {
-            None => (None, None),
-            Some(crate::track::altitude::AltitudeSpec::Single(value)) => (Some(value), None),
-            Some(crate::track::altitude::AltitudeSpec::Range(range)) => (None, Some(range)),
-        };
+        let manual_altitude = None;
         let (dist, dur) = (plan.dist * 1000.0, plan.dur); // 米
         let start_ms = plan.start_ms;
         let face_check = if page.face_check { 1 } else { 0 };
-        let route_mode = page.route_mode;
         self.config.dist_min = page.dist_min;
         self.config.dist_max = page.dist_max;
         self.config.pace_min = page.pace_min;
@@ -714,11 +574,19 @@ impl App {
         self.config.face_check = page.face_check;
         self.config.manual_altitude = manual_altitude;
         self.config.manual_altitude_range = manual_altitude_range;
-        self.config.route_mode = if route_mode == RouteMode::Road {
-            "road".into()
-        } else {
-            "legacy".into()
+        self.config.track_color_mode = page.track_color_mode;
+        let track_spec = match page.track_spec {
+            crate::api::model::TrackSpec::Custom { .. } => page
+                .custom_track_length
+                .parse::<u32>()
+                .ok()
+                .filter(|length| (100..=1000).contains(length))
+                .map(|total_m| crate::api::model::TrackSpec::Custom { total_m })
+                .unwrap_or(crate::api::model::TrackSpec::Auto),
+            spec => spec,
         };
+        self.config.track_spec = track_spec;
+        let track_color_mode = page.track_color_mode;
         let _ = crate::api::model::save_config(&self.config);
 
         let identity = self.identity.clone();
@@ -731,9 +599,9 @@ impl App {
         };
         self.run_busy = true;
         self.status = "跑步提交中…".into();
-        let seed = plan.seed;
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
+            let seed = (crate::crypto::envelope::now_ms() % 2_147_483_647) as u64;
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
             let params = crate::api::flow::RunParams {
                 dist,
@@ -742,18 +610,30 @@ impl App {
                 face_check,
                 manual_altitude,
                 manual_altitude_range,
+                track_color_mode,
+                track_spec,
                 seed,
-                route_mode,
             };
             let payload = match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
                 Ok(out) => {
                     log(&format!(
-                        "全链完成 rrid={} obs={}/2 verify={} uuid={}",
-                        out.result.rrid, out.obs_ok, out.detail_ok, out.result.uuid
+                        "全链完成 rrid={} obs_upload={}/2 obs_roundtrip={} detail_request={} detail_complete={} detail_checks_passed={} uuid={}",
+                        out.result.rrid,
+                        out.obs_upload,
+                        out.obs_roundtrip,
+                        out.detail_request,
+                        out.detail_complete,
+                        out.detail_checks_passed,
+                        out.result.uuid
                     ));
                     serde_json::json!({
                         "ok": true, "rrid": out.result.rrid,
-                        "obs_ok": out.obs_ok, "verify": out.detail_ok,
+                        "obs_upload": out.obs_upload,
+                        "obs_roundtrip": out.obs_roundtrip,
+                        "detail_request": out.detail_request,
+                        "detail_complete": out.detail_complete,
+                        "reason_list": out.reason_list,
+                        "detail_checks_passed": out.detail_checks_passed,
                         "uuid": out.result.uuid,
                         "dist": out.result.total_dis, "dur": out.result.total_time,
                         "steps": out.result.total_steps, "avg_step_freq": out.result.avg_step_freq,
@@ -782,14 +662,17 @@ mod tests {
             dist_max: 2.2,
             pace_min: 350.0,
             pace_max: 370.0,
-            manual_altitude: String::new(),
+            manual_altitude_min: String::new(),
+            manual_altitude_max: String::new(),
+            track_color_mode: crate::api::model::TrackColorMode::FullGreen,
+            track_spec: crate::api::model::TrackSpec::Auto,
+            custom_track_length: "400".into(),
             start_mode,
             days_ago,
             hour: 12,
             minute: 0,
             face_check: false,
             plan: None,
-            ..Default::default()
         }
     }
 
