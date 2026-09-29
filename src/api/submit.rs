@@ -36,10 +36,18 @@ fn android_tensec(track: &Track, start_ms: i64, kind: &str) -> Vec<Value> {
                 "flag": start_ms, "id": rid_seed + qn as i64, "queueNum": qn, "state": 0,
             }));
         } else {
+            let cadence = if window.time > 0 {
+                window.value / window.time as f64 * 60.0
+            } else {
+                0.0
+            };
+            let spread = (cadence * 0.055).clamp(3.0, 8.0);
             out.push(json!({
-                "avgDiff": 0.0, "beginTime": begin, "endTime": end,
+                "avgDiff": round_to(cadence, 2), "beginTime": begin, "endTime": end,
                 "flag": start_ms, "id": rid_seed + qn as i64, "maxDiff": 0.0,
-                "minDiff": 1000.0, "queueNum": qn, "state": 0, "stepsNum": window.value as i64,
+                "minDiff": round_to((cadence - spread).max(1.0), 2),
+                "maxDiff": round_to(cadence + spread, 2),
+                "queueNum": qn, "state": 0, "stepsNum": window.value as i64,
             }));
         }
         lo = hi;

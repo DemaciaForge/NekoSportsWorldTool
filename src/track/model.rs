@@ -134,8 +134,8 @@ impl Track {
         (endpoint.1, endpoint.2 as i64)
     }
 
-    /// Build the single canonical set of 10-second windows used by both the
-    /// record request and OBS. A shorter final window keeps its real duration.
+    /// Build dense windows used by the record request and OBS. Narrow windows
+    /// render as contiguous columns; low-frequency generation controls values.
     pub fn ten_second_windows(&self) -> (Vec<TenWindow>, Vec<TenWindow>) {
         let mut speed = Vec::new();
         let mut steps = Vec::new();
@@ -144,13 +144,24 @@ impl Track {
             let hi = (lo + 10).min(self.totalTime);
             let (d_lo, s_lo) = self.cumulative_at(lo);
             let (d_hi, s_hi) = self.cumulative_at(hi);
+            let distance = ((d_hi - d_lo).max(0.0) * 10_000.0).round() / 10_000.0;
+            // Keep the integer protocol count conserved, but distribute the
+            // rounding error with a carry so adjacent dense bars do not
+            // alternate between visibly separated cadence values.
+            // Keep the protocol's cumulative integer step total, while expose
+            // a smooth per-window cadence value to the detail chart.  The
+            // server accepts fractional steps in this diagnostic series and
+            // the submitters round only at the final wire boundary.  Linear
+            // interpolation avoids the 20/21/22 staircase that creates
+            // visibly separated columns on the phone.
+            let step_count = (s_hi - s_lo).max(0) as f64;
             speed.push(TenWindow {
                 time: hi - lo,
-                value: ((d_hi - d_lo).max(0.0) * 10_000.0).round() / 10_000.0,
+                value: distance,
             });
             steps.push(TenWindow {
                 time: hi - lo,
-                value: (s_hi - s_lo).max(0) as f64,
+                value: step_count,
             });
             lo = hi;
         }

@@ -208,16 +208,37 @@ pub fn build_with_fence_and_spec(
     // step target from two low-frequency waves, then reuse it for point
     // steps, ten-second windows, segments and laps.
     let cadence_phase = rng.uniform(0.0, std::f64::consts::TAU);
+    let stride_phase = rng.uniform(0.0, std::f64::consts::TAU);
     let mut cadence_mass = Vec::with_capacity(n);
     let mut cadence_total = 0.0f64;
     for i in 0..n {
         let midpoint = times[i] + dts[i] * 0.5;
+        // Broad, human-scale cadence changes: the 3-6 minute waves are
+        // deliberately visible in the detail chart while remaining smooth.
         let profile = (1.0
-            + 0.045 * (std::f64::consts::TAU * midpoint / 180.0 + cadence_phase).sin()
-            + 0.018 * (std::f64::consts::TAU * midpoint / 72.0 + cadence_phase * 0.63).sin())
-        .max(0.90);
+            // Roughly one visible cadence swing per minute, with a slower
+            // companion wave so the result is varied without sharp jumps.
+            + 0.075 * (std::f64::consts::TAU * midpoint / 72.0 + cadence_phase).sin()
+            + 0.025 * (std::f64::consts::TAU * midpoint / 118.0 + cadence_phase * 0.63).sin())
+        .clamp(0.88, 1.12);
         cadence_total += profile * dts[i];
         cadence_mass.push(cadence_total);
+    }
+    // Keep stride changes continuous and low-frequency.  The cadence profile
+    // above controls total step count; this companion profile is used to
+    // distribute those steps over distance so each ten-second window retains
+    // a plausible, slowly varying stride rather than alternating rounded
+    // distance/step quotients.
+    let mut stride_mass = Vec::with_capacity(n);
+    let mut stride_total = 0.0f64;
+    for i in 0..n {
+        let midpoint = times[i] + dts[i] * 0.5;
+        let profile = (1.0
+            + 0.065 * (std::f64::consts::TAU * midpoint / 78.0 + stride_phase).sin()
+            + 0.025 * (std::f64::consts::TAU * midpoint / 131.0 + stride_phase * 0.71).sin())
+            .clamp(0.90, 1.10);
+        stride_total += profile * seg_dist[i];
+        stride_mass.push(stride_total);
     }
     // Real records have a broad, low-frequency change with short correlated
     // GPS/elevation fluctuations. A single sinusoid makes the detail chart
@@ -359,7 +380,12 @@ pub fn build_with_fence_and_spec(
         let target_steps = if i + 1 == n {
             target_total_steps
         } else {
-            (target_total_steps as f64 * cadence_mass[i] / cadence_total.max(1e-9))
+            // Blend time-based cadence with distance-based stride variation.
+            // Both masses are monotonic, so rounding cannot make cumulative
+            // steps go backwards; the final point remains an exact total.
+            let cadence_target = cadence_mass[i] / cadence_total.max(1e-9);
+            let stride_target = stride_mass[i] / stride_total.max(1e-9);
+            (target_total_steps as f64 * (0.62 * cadence_target + 0.38 * stride_target))
                 .round()
                 .clamp(0.0, target_total_steps as f64) as i64
         };
@@ -409,9 +435,14 @@ pub fn build_with_fence_and_spec(
             validDis: round_to(dist_acc, 4),
             validTime: round_to(t_acc, 0) as i64,
             steps: steps_acc as i64,
-            // The Android detail protocol leaves this per-sample field at
-            // zero; stride is derived from the conserved step windows/laps.
-            stepDistance: 0.0,
+            // Store the same per-interval stride used by the cumulative step
+            // series.  This keeps point-level protocol data smooth as well as
+            // the derived ten-second windows and laps.
+            stepDistance: if added_steps > 0 {
+                round_to(disp_of[i] / added_steps as f64, 4)
+            } else {
+                0.0
+            },
             gainTime: fmt_gain_time(start_ms + (t_acc * 1000.0) as i64),
             gainTimeMs: start_ms + (t_acc * 1000.0) as i64,
             queueNum: 0,

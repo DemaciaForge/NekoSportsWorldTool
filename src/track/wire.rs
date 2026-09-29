@@ -686,6 +686,17 @@ fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>) {
     for (a, b) in speed_windows.iter().zip(&step_windows) {
         let hi = (lo + a.time).min(total_time);
         let id = (rrid % 100000) * 1000 + hi;
+        // The detail chart uses the diff fields to draw the vertical extent
+        // of each cadence sample.  Sending the historical 0/1000 sentinels
+        // produces detached columns even when the 10-second windows are
+        // contiguous.  Keep integer steps for protocol conservation, but
+        // provide a narrow, smooth range around the actual cadence.
+        let cadence = if a.time > 0 {
+            b.value / a.time as f64 * 60.0
+        } else {
+            0.0
+        };
+        let spread = (cadence * 0.055).clamp(3.0, 8.0);
         sp.push(json!({
             "beginTime": start_ms + lo * 1000,
             "distance": a.value,
@@ -696,13 +707,13 @@ fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>) {
             "state": 0,
         }));
         stf.push(json!({
-            "avgDiff": 0.0,
+            "avgDiff": round_to(cadence, 2),
             "beginTime": start_ms + lo * 1000,
             "endTime": start_ms + hi * 1000,
             "flag": start_ms,
             "id": id,
-            "maxDiff": 0.0,
-            "minDiff": 1000.0,
+            "maxDiff": round_to(cadence + spread, 2),
+            "minDiff": round_to((cadence - spread).max(1.0), 2),
             "queueNum": 0,
             "state": 0,
             "stepsNum": b.value as i64,

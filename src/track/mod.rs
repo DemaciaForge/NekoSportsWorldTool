@@ -209,7 +209,7 @@ mod tests {
         assert!(cadence.iter().all(|value| (90.0..=210.0).contains(value)));
         assert!(cadence
             .windows(2)
-            .all(|pair| (pair[1] - pair[0]).abs() <= 12.0));
+            .all(|pair| (pair[1] - pair[0]).abs() <= 18.0));
         let stride: Vec<f64> = track
             .speedPerTenSec
             .iter()
@@ -218,10 +218,17 @@ mod tests {
                 (steps.value > 0.0).then_some(distance.value / steps.value)
             })
             .collect();
-        assert!(stride.iter().all(|value| (0.75..=1.35).contains(value)));
-        assert!(stride
+        assert!(stride.iter().all(|value| (0.85..=1.25).contains(value)));
+        assert!(stride.windows(2).all(|pair| (pair[1] - pair[0]).abs() <= 0.15));
+        assert!(track
+            .stepsPerTenSec
+            .iter()
+            .all(|window| window.value > 0.0),
+            "运动分钟窗口不应出现零步频"
+        );
+        assert!(cadence
             .windows(2)
-            .all(|pair| (pair[1] - pair[0]).abs() <= 0.20));
+            .all(|pair| (pair[1] - pair[0]).abs() <= 18.0));
 
         let laps = super::wire::build_laps_for_test(&track, track.startTime);
         let lap_steps: i64 = laps.iter().map(|lap| lap["step"].as_i64().unwrap()).sum();
