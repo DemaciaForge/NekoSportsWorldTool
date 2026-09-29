@@ -11,7 +11,7 @@ use crate::crypto::header::{build_android_header, HeaderIdentity, UA_ANDROID};
 use crate::crypto::sign::{original_sign, signature};
 use crate::track::calorie::{avg_power, official_kcal};
 use crate::track::geom::round_to;
-use crate::track::model::{GenPoint, Track};
+use crate::track::model::{cadence_band, GenPoint, Track};
 use crate::track::wire::validate_five_point_wrapper;
 use serde_json::{json, Map, Value};
 
@@ -53,10 +53,18 @@ fn android_tensec(track: &Track, start_ms: i64, kind: &str) -> Vec<Value> {
                 "flag": start_ms, "id": rid_seed + qn, "queueNum": qn, "state": 0,
             }));
         } else {
+            let cadence = if hi > lo {
+                steps_n as f64 / (hi - lo) as f64 * 60.0
+            } else {
+                0.0
+            };
+            let band = cadence_band(cadence);
             out.push(json!({
-                "avgDiff": 0.0, "beginTime": begin, "endTime": end,
-                "flag": start_ms, "id": rid_seed + qn, "maxDiff": 0.0,
-                "minDiff": 1000.0, "queueNum": qn, "state": 0, "stepsNum": steps_n,
+                "avgDiff": round_to(band.avg, 2), "beginTime": begin, "endTime": end,
+                "flag": start_ms, "id": rid_seed + qn,
+                "maxDiff": round_to(band.max, 2),
+                "minDiff": round_to(band.min, 2),
+                "queueNum": qn, "state": 0, "stepsNum": steps_n,
             }));
         }
         w += 10;

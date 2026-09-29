@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 
 use super::geom::round_to;
-use super::model::{GenPoint, Track};
+use super::model::{cadence_band, GenPoint, Track};
 
 const X_PI: f64 = std::f64::consts::PI * 3000.0 / 180.0;
 
@@ -166,6 +166,12 @@ fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>) {
         let hi = (i * 10 + 10) as i64;
         let hi = hi.min(total_time);
         let id = (rrid % 100000) * 1000 + hi;
+        let cadence = if a.time > 0 {
+            b.value / a.time as f64 * 60.0
+        } else {
+            0.0
+        };
+        let band = cadence_band(cadence);
         sp.push(json!({
             "beginTime": start_ms + lo * 1000,
             "distance": a.value,
@@ -176,13 +182,13 @@ fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>) {
             "state": 0,
         }));
         stf.push(json!({
-            "avgDiff": 0.0,
+            "avgDiff": round_to(band.avg, 2),
             "beginTime": start_ms + lo * 1000,
             "endTime": start_ms + hi * 1000,
             "flag": start_ms,
             "id": id,
-            "maxDiff": 0.0,
-            "minDiff": 1000.0,
+            "maxDiff": round_to(band.max, 2),
+            "minDiff": round_to(band.min, 2),
             "queueNum": 0,
             "state": 0,
             "stepsNum": b.value as i64,
