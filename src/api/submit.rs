@@ -72,6 +72,33 @@ fn android_tensec(track: &Track, start_ms: i64, kind: &str) -> Vec<Value> {
     out
 }
 
+#[cfg(test)]
+mod cadence_tests {
+    use super::android_tensec;
+
+    #[test]
+    fn submit_step_windows_use_ordered_non_sentinel_ranges() {
+        let points = vec![(38.901678, 121.540241), (38.902564, 121.541233)];
+        let track = crate::track::generator::build(
+            1200.0,
+            600,
+            7,
+            (38.9, 121.54),
+            1_700_000_000_000,
+            &points,
+        );
+        let windows = android_tensec(&track, track.startTime, "steps");
+        assert!(!windows.is_empty());
+        for window in windows {
+            let avg = window["avgDiff"].as_f64().unwrap();
+            let min = window["minDiff"].as_f64().unwrap();
+            let max = window["maxDiff"].as_f64().unwrap();
+            assert!(min <= avg && avg <= max);
+            assert_ne!((avg, min, max), (0.0, 1000.0, 0.0));
+        }
+    }
+}
+
 /// bdA 正差分累计。
 pub fn total_ascent(locs: &[GenPoint]) -> f64 {
     let mut ascent = 0.0;

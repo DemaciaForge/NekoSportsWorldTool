@@ -134,6 +134,28 @@ mod validation_tests {
     #[test] fn rejects_empty_or_malformed_five_point_payload() { assert!(validate_five_point_wrapper("{}").is_err()); assert!(validate_five_point_wrapper(r#"{"fivePointJson":"[]"}"#).is_err()); }
 
     #[test]
+    fn cadence_windows_use_ordered_non_sentinel_ranges() {
+        let points = vec![(38.901678, 121.540241), (38.902564, 121.541233)];
+        let track = crate::track::generator::build(
+            1200.0,
+            600,
+            7,
+            (38.9, 121.54),
+            1_700_000_000_000,
+            &points,
+        );
+        let (_, step_freq) = build_windows(&track, 12345);
+        assert!(!step_freq.is_empty());
+        for window in step_freq {
+            let avg = window["avgDiff"].as_f64().unwrap();
+            let min = window["minDiff"].as_f64().unwrap();
+            let max = window["maxDiff"].as_f64().unwrap();
+            assert!(min <= avg && avg <= max);
+            assert_ne!((avg, min, max), (0.0, 1000.0, 0.0));
+        }
+    }
+
+    #[test]
     fn laps_are_rebuilt_from_overridden_altitude() {
         let points = vec![(38.901678, 121.540241), (38.902564, 121.541233)];
         let mut track = crate::track::generator::build(
