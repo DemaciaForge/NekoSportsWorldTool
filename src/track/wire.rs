@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 
 use super::geom::round_to;
-use super::model::{GenPoint, Track};
+use super::model::{cadence_band, GenPoint, Track};
 
 const X_PI: f64 = std::f64::consts::PI * 3000.0 / 180.0;
 
@@ -672,6 +672,27 @@ mod validation_tests {
         assert!(ascent > 0.0);
         assert!(descent > 0.0);
     }
+
+    #[test]
+    fn cadence_windows_use_ordered_non_sentinel_ranges() {
+        let track = crate::track::generator::build(
+            1200.0,
+            600,
+            7,
+            (38.9, 121.54),
+            1_700_000_000_000,
+            &[(38.901678, 121.540241), (38.902564, 121.541233)],
+        );
+        let (_, step_freq) = build_windows(&track, 12345);
+        assert!(!step_freq.is_empty());
+        for window in step_freq {
+            let avg = window["avgDiff"].as_f64().unwrap();
+            let min = window["minDiff"].as_f64().unwrap();
+            let max = window["maxDiff"].as_f64().unwrap();
+            assert!(min <= avg && avg <= max);
+            assert_ne!((avg, min, max), (0.0, 1000.0, 0.0));
+        }
+    }
 }
 
 /// 10s 时间窗，id=(rrid%100000)*1000+窗口序秒（6 个真人样本跨 9 月记录验证一致；
@@ -686,6 +707,12 @@ fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>) {
     for (a, b) in speed_windows.iter().zip(&step_windows) {
         let hi = (lo + a.time).min(total_time);
         let id = (rrid % 100000) * 1000 + hi;
+        let cadence = if a.time > 0 {
+            b.value / a.time as f64 * 60.0
+        } else {
+            0.0
+        };
+        let band = cadence_band(cadence);
         sp.push(json!({
             "beginTime": start_ms + lo * 1000,
             "distance": a.value,
@@ -696,13 +723,13 @@ fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>) {
             "state": 0,
         }));
         stf.push(json!({
-            "avgDiff": 0.0,
+            "avgDiff": round_to(band.avg, 2),
             "beginTime": start_ms + lo * 1000,
             "endTime": start_ms + hi * 1000,
             "flag": start_ms,
             "id": id,
-            "maxDiff": 0.0,
-            "minDiff": 1000.0,
+            "maxDiff": round_to(band.max, 2),
+            "minDiff": round_to(band.min, 2),
             "queueNum": 0,
             "state": 0,
             "stepsNum": b.value as i64,

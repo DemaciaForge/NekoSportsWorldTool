@@ -47,6 +47,34 @@ pub struct TenWindow {
     pub value: f64,
 }
 
+/// Cadence range sent with each detail-page step-frequency window.
+///
+/// The historical Android payload used `avgDiff=0`, `minDiff=1000`, and
+/// `maxDiff=0` as placeholders. Those values are only valid for an empty
+/// window; normal windows should describe the measured cadence.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CadenceBand {
+    pub avg: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+pub fn cadence_band(cadence: f64) -> CadenceBand {
+    if !cadence.is_finite() || cadence <= 0.0 {
+        return CadenceBand {
+            avg: 0.0,
+            min: 0.0,
+            max: 0.0,
+        };
+    }
+    let spread = (cadence * 0.055).clamp(3.0, 8.0);
+    CadenceBand {
+        avg: cadence,
+        min: (cadence - spread).max(1.0),
+        max: cadence + spread,
+    }
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct Segment {
     pub totalTime: i64,
@@ -232,6 +260,22 @@ impl Track {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cadence_band_is_ordered_and_empty_only_uses_zeroes() {
+        let band = cadence_band(132.0);
+        assert!(band.min <= band.avg && band.avg <= band.max);
+        assert_ne!((band.avg, band.min, band.max), (0.0, 1000.0, 0.0));
+        assert_eq!(
+            cadence_band(0.0),
+            CadenceBand {
+                avg: 0.0,
+                min: 0.0,
+                max: 0.0
+            }
+        );
+    }
+
     fn sample_track() -> Track {
         let point = GenPoint {
             id: 1,

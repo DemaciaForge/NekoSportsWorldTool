@@ -9,7 +9,7 @@ use crate::crypto::header::{build_android_header, HeaderIdentity, UA_ANDROID};
 use crate::crypto::sign::{original_sign, signature};
 use crate::track::calorie::{avg_power, official_kcal};
 use crate::track::geom::round_to;
-use crate::track::model::{GenPoint, Track};
+use crate::track::model::{cadence_band, GenPoint, Track};
 use crate::track::wire::validate_five_point_wrapper;
 use serde_json::{json, Map, Value};
 
@@ -36,10 +36,18 @@ fn android_tensec(track: &Track, start_ms: i64, kind: &str) -> Vec<Value> {
                 "flag": start_ms, "id": rid_seed + qn as i64, "queueNum": qn, "state": 0,
             }));
         } else {
+            let cadence = if window.time > 0 {
+                window.value / window.time as f64 * 60.0
+            } else {
+                0.0
+            };
+            let band = cadence_band(cadence);
             out.push(json!({
-                "avgDiff": 0.0, "beginTime": begin, "endTime": end,
-                "flag": start_ms, "id": rid_seed + qn as i64, "maxDiff": 0.0,
-                "minDiff": 1000.0, "queueNum": qn, "state": 0, "stepsNum": window.value as i64,
+                "avgDiff": round_to(band.avg, 2), "beginTime": begin, "endTime": end,
+                "flag": start_ms, "id": rid_seed + qn as i64,
+                "maxDiff": round_to(band.max, 2),
+                "minDiff": round_to(band.min, 2),
+                "queueNum": qn, "state": 0, "stepsNum": window.value as i64,
             }));
         }
         lo = hi;
@@ -365,6 +373,13 @@ mod tests {
                 .sum::<i64>(),
             track.totalSteps
         );
+        for window in steps {
+            let avg = window["avgDiff"].as_f64().unwrap();
+            let min = window["minDiff"].as_f64().unwrap();
+            let max = window["maxDiff"].as_f64().unwrap();
+            assert!(min <= avg && avg <= max);
+            assert_ne!((avg, min, max), (0.0, 1000.0, 0.0));
+        }
     }
 
     #[test]
