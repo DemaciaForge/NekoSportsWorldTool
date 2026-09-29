@@ -47,6 +47,28 @@ pub struct TenWindow {
     pub value: f64,
 }
 
+/// Detail-page cadence range for one dense window.
+/// Older records used `avgDiff=0`, `minDiff=1000`, and `maxDiff=0` as
+/// placeholders, which makes the mobile chart render detached columns.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CadenceBand {
+    pub avg: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+pub fn cadence_band(cadence: f64) -> CadenceBand {
+    if cadence <= 0.0 {
+        return CadenceBand { avg: 0.0, min: 0.0, max: 0.0 };
+    }
+    let spread = (cadence * 0.055).clamp(3.0, 8.0);
+    CadenceBand {
+        avg: cadence,
+        min: (cadence - spread).max(1.0),
+        max: cadence + spread,
+    }
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct Segment {
     pub totalTime: i64,
@@ -94,6 +116,17 @@ impl Track {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cadence_band_is_ordered_and_rejects_old_sentinels() {
+        let band = cadence_band(132.0);
+        assert!(band.min <= band.avg && band.avg <= band.max);
+        assert_ne!(band.avg, 0.0);
+        assert_ne!(band.min, 1000.0);
+        assert_ne!(band.max, 0.0);
+        assert_eq!(cadence_band(0.0), CadenceBand { avg: 0.0, min: 0.0, max: 0.0 });
+    }
+
     fn sample_track() -> Track {
         let point = GenPoint { id: 1, flag: 1, lat: -1.0, lng: -1.0, gLat: 39.9, gLng: 116.4, speed: 1.0, avgSpeed: 1.0, radius: 3.0, accuracy: 3.0, ptype: 0, locType: 1, hasAltitude: true, totalTime: 1, totalDis: 1.0, validDis: 1.0, validTime: 1, steps: 1, stepDistance: 0.0, gainTime: String::new(), gainTimeMs: 1, queueNum: 0, coorType: "gcj02".into(), bdA: 1.0, bdD: 0.0, bdS: 1.0, bdG: 1, count: 1, dtr: 0.0, state: 0, locationId: String::new() };
         Track { totalTime: 1, totalDistance: 1.0, validDistance: 1.0, validTime: 1, startTime: 1, startLatitude: 39.9, startLongitude: 116.4, locations: vec![point], totalSteps: 1, speedPerTenSec: vec![], stepsPerTenSec: vec![], segments: vec![] }
