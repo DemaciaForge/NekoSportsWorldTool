@@ -1,0 +1,32 @@
+name: Publish consolidated source release
+
+on:
+  push:
+    branches:
+      - integrate/pr34-pr35-pr36-issue38
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: contains(github.event.head_commit.message, 'chore: publish v0.3.1 release')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create v0.3.1 release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.3.1
+          target_commitish: ${{ github.sha }}
+          name: NekoSportsWorldTool v0.3.1
+          generate_release_notes: true
+          body: |
+            本版本整合 PR #34、#35、#36，并修复 Issue #38。
+
+            修复内容：
+            - 修正总配速的服务端单位换算；
+            - 修正每公里配速和步幅单位；
+            - 统一海拔累计算法，过滤不超过 0.15 米的噪声；
+            - 保留路线、打卡点、dry-run、fixture、日志脱敏和相关测试。
+
+            本 Release 当前提供 GitHub 源码归档。Windows 本地 Cargo 完整测试受到 Schannel 依赖下载问题影响，详情见 PR #40。
