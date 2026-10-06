@@ -355,6 +355,12 @@ impl App {
                     .map(|r| format!("{}-{}", r.min_m, r.max_m))
                     .or_else(|| config.manual_altitude.map(|v| v.to_string()))
                     .unwrap_or_default(),
+                track_color_mode: config.track_color_mode,
+                track_spec: config.track_spec,
+                custom_track_length: match config.track_spec {
+                    crate::api::model::TrackSpec::Custom { total_m } => total_m.to_string(),
+                    _ => "400".into(),
+                },
                 start_mode: 0,
                 days_ago: 0,
                 hour: 12,

@@ -1,6 +1,6 @@
 //! OBS 对象组装。
 //!
-//! 10 键对象，每值 gzip+base64；BD→GCJ 单次转换；27 键协议点集；
+//! 10 键对象，每值 gzip+base64；BD→GCJ 单次转换；28 键协议点集；
 //! 10s 窗（speed/step_freq）；每 1000m 一圈；五点 fixed_point_json。
 #![allow(non_snake_case)]
 
@@ -11,9 +11,46 @@ use serde_json::{json, Value};
 use std::io::Write;
 
 use super::geom::round_to;
-use super::model::{GenPoint, Track};
+use super::model::{cadence_band, GenPoint, Track};
 
 const X_PI: f64 = std::f64::consts::PI * 3000.0 / 180.0;
+
+/// The run-area metadata returned by the point endpoint.
+///
+/// Older callers can keep using the default value (free-run semantics), while
+/// campus runs pass through the server-provided area id and fence JSON so the
+/// record detail page can draw the same green boundary as the official app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunAreaMeta {
+    pub run_area_id: i64,
+    pub geo_fences_json: String,
+    pub freedom_show_fence: bool,
+}
+
+impl Default for RunAreaMeta {
+    fn default() -> Self {
+        Self {
+            run_area_id: -1,
+            geo_fences_json: "[]".into(),
+            freedom_show_fence: false,
+        }
+    }
+}
+
+/// 保留服务端返回的有效围栏；`-1` 表示接口未提供区域 ID，不应抹掉真实围栏。
+/// 未知围栏格式仍回退到默认值，避免把无效元数据写入详情对象。
+fn payload_area(area: &RunAreaMeta) -> RunAreaMeta {
+    let valid = area.run_area_id >= -1
+        && area.freedom_show_fence
+        && serde_json::from_str::<Value>(&area.geo_fences_json)
+            .ok()
+            .is_some_and(|value| matches!(value, Value::Array(ref items) if !items.is_empty()));
+    if valid {
+        area.clone()
+    } else {
+        RunAreaMeta::default()
+    }
+}
 
 /// 百度 BD-09 → 高德 GCJ-02。
 pub fn bd09_to_gcj02(bd_lat: f64, bd_lng: f64) -> (f64, f64) {
@@ -40,7 +77,103 @@ fn gz_str(v: &str) -> String {
     gz(v.as_bytes())
 }
 
-/// 27 键协议点集（gen 点 → OBS 点；gLat/gLng 由 BD 转 GCJ）。
+fn value_as_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+        .filter(|number: &f64| number.is_finite())
+}
+
+fn value_as_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        .or_else(|| value_as_f64(value).map(|number| number as i64))
+        .or_else(|| value.as_bool().map(|value| if value { 1 } else { 0 }))
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| match text.trim().to_ascii_lowercase().as_str() {
+                    "true" | "yes" => Some(1),
+                    "false" | "no" => Some(0),
+                    _ => None,
+                })
+        })
+}
+
+/// Read checkpoint metadata without inventing values when a server version
+/// does not return that field.  Several API versions wrap the point in a
+/// `pointInfo`/`fixedPoint` object and use a slightly different spelling.
+fn server_field(value: &Value, names: &[&str]) -> Option<Value> {
+    fn visit(value: &Value, names: &[&str], depth: usize) -> Option<Value> {
+        if depth == 0 {
+            return None;
+        }
+        match value {
+            Value::Object(map) => {
+                for name in names {
+                    if let Some(item) = map.get(*name).filter(|item| !item.is_null()) {
+                        return Some(item.clone());
+                    }
+                }
+                // Only inspect likely point metadata containers.  Walking
+                // arbitrary nested objects could accidentally pick an id from
+                // a fence vertex rather than the checkpoint itself.
+                for container in [
+                    "point",
+                    "pointInfo",
+                    "fixedPoint",
+                    "checkpoint",
+                    "checkPoint",
+                    "data",
+                ] {
+                    if let Some(child) = map.get(container) {
+                        if let Some(found) = visit(child, names, depth - 1) {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+            Value::Array(items) if items.len() == 1 => {
+                return visit(&items[0], names, depth - 1);
+            }
+            Value::String(text) => {
+                if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                    return visit(&parsed, names, depth - 1);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+    visit(value, names, 3)
+}
+
+const CHECKPOINT_ID_FIELDS: &[&str] = &[
+    "id",
+    "pointId",
+    "pointID",
+    "fixedPointId",
+    "fixedPointID",
+    "checkpointId",
+    "checkPointId",
+];
+const CHECKPOINT_POSITION_FIELDS: &[&str] = &[
+    "position",
+    "pointPosition",
+    "pointIndex",
+    "sort",
+    "sortNum",
+    "seq",
+    "sequence",
+    "order",
+    "orderNum",
+];
+const CHECKPOINT_STATE_FIELDS: &[&str] =
+    &["state", "pointState", "status", "pointStatus", "passState"];
+const CHECKPOINT_COORDINATE_TYPE_FIELDS: &[&str] = &["coorType", "coordType", "coordinateType"];
+
+/// 28 键协议点集（gen 点 → OBS 点；gLat/gLng 由 BD 转 GCJ）。
 pub fn conv_point(p: &GenPoint, start_ms: i64) -> Value {
     let (glat, glng) = bd09_to_gcj02(p.gLat, p.gLng);
     json!({
@@ -64,8 +197,9 @@ pub fn conv_point(p: &GenPoint, start_ms: i64) -> Value {
         "queueNum": p.queueNum,
         "radius": round_to(p.radius, 2),
         "speed": round_to(p.speed, 4),
+        "steps": p.steps,
         "state": p.state,
-        "stepDistance": 0.0,
+        "stepDistance": round_to(p.stepDistance, 4),
         "totalDis": round_to(p.totalDis, 4),
         "totalTime": p.totalTime,
         "type": p.ptype,
@@ -80,61 +214,388 @@ pub fn five_point_payload(points: &[Value], start_ms: i64) -> Vec<Value> {
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            json!({
+            let mut output = json!({
                 "flag": start_ms,
-                "glat": p["glat"].as_f64().unwrap_or(0.0),
-                "glon": p["glon"].as_f64().unwrap_or(0.0),
-                "id": i as i64 + 1,
-                "isFixed": p["isFixed"].as_i64().unwrap_or(0),
+                "glat": p.get("glat").and_then(value_as_f64).unwrap_or(0.0),
+                "glon": p.get("glon").and_then(value_as_f64).unwrap_or(0.0),
+                "isFixed": 1,
                 "isPass": true,
-                "lat": p["lat"].as_f64().unwrap_or(0.0),
-                "lon": p["lon"].as_f64().unwrap_or(0.0),
+                "lat": p.get("lat").and_then(value_as_f64).unwrap_or(0.0),
+                "lon": p.get("lon").and_then(value_as_f64).unwrap_or(0.0),
                 "pointName": p["pointName"].as_str().unwrap_or(""),
-                "position": 999,
-                "state": 0,
-            })
+            });
+            let object = output
+                .as_object_mut()
+                .expect("five-point payload is an object");
+            for (name, fields) in [
+                ("id", CHECKPOINT_ID_FIELDS),
+                ("position", CHECKPOINT_POSITION_FIELDS),
+                ("state", CHECKPOINT_STATE_FIELDS),
+                ("coorType", CHECKPOINT_COORDINATE_TYPE_FIELDS),
+            ] {
+                if let Some(value) = server_field(p, fields) {
+                    object.insert(name.into(), value);
+                }
+            }
+            // The live point endpoint used by this account omits these three
+            // fields, while the known-good detail sample includes them.  The
+            // server's compatibility format is positional: ids are 1..N,
+            // position 999 means a passed fixed point, and state 0 is the
+            // completed state.  Fill only when absent; returned values remain
+            // authoritative.
+            object
+                .entry("id")
+                .or_insert_with(|| Value::from(i as i64 + 1));
+            object.entry("position").or_insert_with(|| Value::from(999));
+            object.entry("state").or_insert_with(|| Value::from(0));
+            output
         })
         .collect()
 }
 
+/// Fixed-point payload.  The known-good official sample uses the run start for
+/// every fixed point's `flag`; keep that protocol value for compatibility.
+/// Route matching is still validated separately by the caller.
+pub fn five_point_payload_for_track(points: &[Value], start_ms: i64, track: &Track) -> Vec<Value> {
+    let payload = five_point_payload(points, start_ms);
+    for point in points {
+        // Point responses have appeared with both BD-like `lat/lon` and
+        // converted `glat/glon` fields.  The generated route uses whichever
+        // coordinate set the point endpoint supplied, so choose the candidate
+        // that is actually closest to this track instead of assuming a field
+        // name identifies the coordinate system.
+        let candidates = [
+            point
+                .get("lat")
+                .and_then(value_as_f64)
+                .zip(point.get("lon").and_then(value_as_f64)),
+            point
+                .get("glat")
+                .and_then(value_as_f64)
+                .zip(point.get("glon").and_then(value_as_f64)),
+        ];
+        let Some((target_lat, target_lng)) =
+            candidates
+                .into_iter()
+                .flatten()
+                .min_by(|(alat, alng), (blat, blng)| {
+                    let distance = |lat: f64, lng: f64| {
+                        track
+                            .locations
+                            .iter()
+                            .map(|sample| {
+                                ((sample.gLat - lat) * super::geom::MET_PER_DEG_LAT).powi(2)
+                                    + ((sample.gLng - lng) * super::geom::MET_PER_DEG_LNG).powi(2)
+                            })
+                            .fold(f64::INFINITY, f64::min)
+                    };
+                    distance(*alat, *alng)
+                        .partial_cmp(&distance(*blat, *blng))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        else {
+            continue;
+        };
+        let nearest = track.locations.iter().min_by(|a, b| {
+            let da = ((a.gLat - target_lat) * super::geom::MET_PER_DEG_LAT).powi(2)
+                + ((a.gLng - target_lng) * super::geom::MET_PER_DEG_LNG).powi(2);
+            let db = ((b.gLat - target_lat) * super::geom::MET_PER_DEG_LAT).powi(2)
+                + ((b.gLng - target_lng) * super::geom::MET_PER_DEG_LNG).powi(2);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if let Some(route_point) = nearest {
+            let timestamp = start_ms + route_point.totalTime.max(0) * 1000;
+            let _ = timestamp;
+        }
+    }
+    payload
+}
+
 /// 提交 body 的 fivePointJson 包装串。
 pub fn five_point_wrapper(points: &[Value], start_ms: i64) -> String {
+    five_point_wrapper_with_area(points, start_ms, &RunAreaMeta::default())
+}
+
+/// Build the fixed-point wrapper while preserving the server's campus area
+/// and geofence metadata.
+pub fn five_point_wrapper_with_area(points: &[Value], start_ms: i64, area: &RunAreaMeta) -> String {
     let five = five_point_payload(points, start_ms);
+    let area = payload_area(area);
     json!({
         "useZip": false,
         "fivePointJson": Value::Array(five).to_string(),
-        "runAreaId": -1,
-        "geoFencesJson": "[]",
-        "freedomShowFence": false,
+        "runAreaId": area.run_area_id,
+        "geoFencesJson": area.geo_fences_json,
+        "freedomShowFence": area.freedom_show_fence,
+    })
+    .to_string()
+}
+
+pub fn five_point_wrapper_with_area_and_track(
+    points: &[Value],
+    start_ms: i64,
+    area: &RunAreaMeta,
+    track: &Track,
+) -> String {
+    let five = five_point_payload_for_track(points, start_ms, track);
+    let area = payload_area(area);
+    json!({
+        "useZip": false,
+        "fivePointJson": Value::Array(five).to_string(),
+        "runAreaId": area.run_area_id,
+        "geoFencesJson": area.geo_fences_json,
+        "freedomShowFence": area.freedom_show_fence,
     })
     .to_string()
 }
 
 /// 校验提交用五点轨迹仍是同一次点位请求产生的有效数据。
 pub fn validate_five_point_wrapper(wrapper: &str) -> Result<(), String> {
-    let outer: Value = serde_json::from_str(wrapper).map_err(|e| format!("五点轨迹 JSON 无效: {e}"))?;
-    let raw = outer.get("fivePointJson").and_then(Value::as_str).ok_or("五点轨迹缺少 fivePointJson")?;
-    let points: Vec<Value> = serde_json::from_str(raw).map_err(|e| format!("五点轨迹数组无效: {e}"))?;
-    if points.is_empty() { return Err("五点轨迹不能为空".into()); }
-    for point in points {
+    let outer: Value =
+        serde_json::from_str(wrapper).map_err(|e| format!("五点轨迹 JSON 无效: {e}"))?;
+    let raw = outer
+        .get("fivePointJson")
+        .and_then(Value::as_str)
+        .ok_or("五点轨迹缺少 fivePointJson")?;
+    let points: Vec<Value> =
+        serde_json::from_str(raw).map_err(|e| format!("五点轨迹数组无效: {e}"))?;
+    if points.is_empty() {
+        return Err("五点轨迹不能为空".into());
+    }
+    for (index, point) in points.iter().enumerate() {
         let lat = point.get("lat").and_then(Value::as_f64).unwrap_or(0.0);
         let lon = point.get("lon").and_then(Value::as_f64).unwrap_or(0.0);
         let glat = point.get("glat").and_then(Value::as_f64).unwrap_or(0.0);
         let glon = point.get("glon").and_then(Value::as_f64).unwrap_or(0.0);
-        if (lat == 0.0 && lon == 0.0) || (glat == 0.0 && glon == 0.0) { return Err("五点轨迹包含缺失坐标".into()); }
+        if (lat == 0.0 && lon == 0.0) || (glat == 0.0 && glon == 0.0) {
+            return Err("五点轨迹包含缺失坐标".into());
+        }
         crate::location::Coordinate::new(lat, lon, 0.0)?;
         crate::location::Coordinate::new(glat, glon, 0.0)?;
+        if point.get("isPass").and_then(Value::as_bool) != Some(true) {
+            return Err(format!("五点轨迹第 {} 个点未标记 isPass=true", index + 1));
+        }
+        if point.get("isFixed").and_then(value_as_i64) != Some(1) {
+            return Err(format!("五点轨迹第 {} 个点未标记 isFixed=1", index + 1));
+        }
+    }
+    let fence_value = outer.get("geoFencesJson").cloned().unwrap_or(Value::Null);
+    let fence_json = match fence_value {
+        Value::String(text) => text,
+        Value::Null => String::new(),
+        value => value.to_string(),
+    };
+    let area = RunAreaMeta {
+        run_area_id: outer.get("runAreaId").and_then(value_as_i64).unwrap_or(-2),
+        geo_fences_json: fence_json,
+        freedom_show_fence: outer
+            .get("freedomShowFence")
+            .and_then(value_as_bool)
+            .unwrap_or(false),
+    };
+    if area.run_area_id < -1 {
+        return Err("五点轨迹缺少有效 runAreaId".into());
+    }
+    if !area.freedom_show_fence
+        || !serde_json::from_str::<Value>(&area.geo_fences_json)
+            .ok()
+            .is_some_and(|v| matches!(v, Value::Array(items) if !items.is_empty()))
+    {
+        return Err("五点轨迹缺少有效绿色围栏".into());
     }
     Ok(())
+}
+
+fn value_as_bool(value: &Value) -> Option<bool> {
+    value.as_bool().or_else(|| {
+        value.as_i64().map(|number| number != 0).or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| match text.trim().to_ascii_lowercase().as_str() {
+                    "true" | "yes" | "1" => Some(true),
+                    "false" | "no" | "0" => Some(false),
+                    _ => None,
+                })
+        })
+    })
 }
 
 #[cfg(test)]
 mod validation_tests {
     use super::*;
-    #[test] fn rejects_empty_or_malformed_five_point_payload() { assert!(validate_five_point_wrapper("{}").is_err()); assert!(validate_five_point_wrapper(r#"{"fivePointJson":"[]"}"#).is_err()); }
+    #[test]
+    fn rejects_empty_or_malformed_five_point_payload() {
+        assert!(validate_five_point_wrapper("{}").is_err());
+        assert!(validate_five_point_wrapper(r#"{"fivePointJson":"[]"}"#).is_err());
+    }
 
     #[test]
-    fn laps_are_rebuilt_from_overridden_altitude() {
+    fn fixed_point_payload_accepts_string_coordinates_and_sets_passed_flag() {
+        let points = vec![json!({
+            "lat": "39.493046", "lon": "116.255475",
+            "glat": "39.493046", "glon": "116.255475",
+            "isFixed": false, "pointName": "点位1",
+            "id": 73, "position": 4, "state": 1,
+        })];
+        let payload = five_point_payload(&points, 123);
+        assert_eq!(payload.len(), 1);
+        assert_eq!(payload[0]["lat"], 39.493046);
+        assert_eq!(payload[0]["lon"], 116.255475);
+        assert_eq!(payload[0]["glat"], 39.493046);
+        assert_eq!(payload[0]["glon"], 116.255475);
+        assert_eq!(payload[0]["isFixed"], 1);
+        assert_eq!(payload[0]["isPass"], true);
+        assert_eq!(payload[0]["id"], 73);
+        assert_eq!(payload[0]["position"], 4);
+        assert_eq!(payload[0]["state"], 1);
+    }
+
+    #[test]
+    fn fixed_point_payload_fills_compatibility_metadata_when_server_omits_it() {
+        let payload = five_point_payload(
+            &[json!({
+                "lat": 39.4, "lon": 116.2, "glat": 39.4, "glon": 116.2,
+                "isFixed": "1",
+            })],
+            123,
+        );
+        assert_eq!(payload[0]["isFixed"], 1);
+        assert_eq!(payload[0]["id"], 1);
+        assert_eq!(payload[0]["position"], 999);
+        assert_eq!(payload[0]["state"], 0);
+    }
+
+    #[test]
+    fn fixed_point_payload_preserves_aliases_from_server() {
+        let payload = five_point_payload(
+            &[json!({
+                "lat": 39.4, "lon": 116.2, "glat": 39.4, "glon": 116.2,
+                "pointId": "73", "pointPosition": "4", "pointState": "1",
+                "coordType": "bd09",
+            })],
+            123,
+        );
+        assert_eq!(payload[0]["id"], "73");
+        assert_eq!(payload[0]["position"], "4");
+        assert_eq!(payload[0]["state"], "1");
+        assert_eq!(payload[0]["coorType"], "bd09");
+    }
+
+    #[test]
+    fn route_aware_fixed_points_keep_official_start_flag() {
+        let points = vec![
+            // The GCJ-02 fields are intentionally offset from the BD-09
+            // fields, as they are in the live point response.
+            json!({"lat": 38.907678, "lon": 121.546241, "glat": 38.901678, "glon": 121.540241}),
+            json!({"lat": 38.908564, "lon": 121.547233, "glat": 38.902564, "glon": 121.541233}),
+        ];
+        let track = crate::track::generator::build(
+            2200.0,
+            900,
+            7,
+            (38.9, 121.54),
+            1_700_000_000_000,
+            &[(38.901678, 121.540241), (38.902564, 121.541233)],
+        );
+        let payload = five_point_payload_for_track(&points, track.startTime, &track);
+        assert_eq!(payload.len(), 2);
+        let first = payload[0]["flag"].as_i64().unwrap();
+        let second = payload[1]["flag"].as_i64().unwrap();
+        assert_eq!(first, track.startTime);
+        assert_eq!(second, track.startTime);
+        assert!(payload.iter().all(|point| point["flag"] == track.startTime));
+    }
+
+    #[test]
+    fn five_point_validation_requires_passed_points_and_real_fence() {
+        let points = vec![json!({
+            "lat": 39.4, "lon": 116.2, "glat": 39.4, "glon": 116.2,
+            "isFixed": 0, "pointName": "P1",
+        })];
+        let area = RunAreaMeta {
+            run_area_id: -1,
+            geo_fences_json: "[{\"lat\":39.4,\"lon\":116.2}]".into(),
+            freedom_show_fence: true,
+        };
+        let wrapper = five_point_wrapper_with_area(&points, 123, &area);
+        assert!(validate_five_point_wrapper(&wrapper).is_ok());
+
+        let mut outer: Value = serde_json::from_str(&wrapper).unwrap();
+        let mut point_values: Vec<Value> =
+            serde_json::from_str(outer["fivePointJson"].as_str().unwrap()).unwrap();
+        point_values[0]["isPass"] = Value::Bool(false);
+        outer["fivePointJson"] = Value::String(Value::Array(point_values).to_string());
+        assert!(validate_five_point_wrapper(&outer.to_string())
+            .unwrap_err()
+            .contains("isPass"));
+
+        outer["fivePointJson"] = Value::String(
+            serde_json::from_str::<Value>(&wrapper).unwrap()["fivePointJson"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+        outer["geoFencesJson"] = Value::String("[]".into());
+        assert!(validate_five_point_wrapper(&outer.to_string())
+            .unwrap_err()
+            .contains("围栏"));
+    }
+
+    #[test]
+    fn area_metadata_is_written_to_fixed_point_wrapper() {
+        let area = RunAreaMeta {
+            run_area_id: 42,
+            geo_fences_json: "[{\"x\":1}]".into(),
+            freedom_show_fence: true,
+        };
+        let wrapper = five_point_wrapper_with_area(
+            &[json!({"lat": 39.9, "lon": 116.4, "glat": 39.9, "glon": 116.4})],
+            1_700_000_000_000,
+            &area,
+        );
+        let value: Value = serde_json::from_str(&wrapper).unwrap();
+        assert_eq!(value["runAreaId"], 42);
+        assert_eq!(value["geoFencesJson"], "[{\"x\":1}]");
+        assert_eq!(value["freedomShowFence"], true);
+    }
+
+    #[test]
+    fn malformed_area_falls_back_to_route_compatible_defaults() {
+        let area = RunAreaMeta {
+            run_area_id: 42,
+            geo_fences_json: "not-json".into(),
+            freedom_show_fence: true,
+        };
+        let value: Value = serde_json::from_str(&five_point_wrapper_with_area(
+            &[json!({"lat": 39.9, "lon": 116.4, "glat": 39.9, "glon": 116.4})],
+            1_700_000_000_000,
+            &area,
+        ))
+        .unwrap();
+        assert_eq!(value["runAreaId"], -1);
+        assert_eq!(value["geoFencesJson"], "[]");
+        assert_eq!(value["freedomShowFence"], false);
+    }
+
+    #[test]
+    fn server_fence_without_area_id_is_preserved() {
+        let area = RunAreaMeta {
+            run_area_id: -1,
+            geo_fences_json: "[{\"lat\":39.4,\"lon\":116.2}]".into(),
+            freedom_show_fence: true,
+        };
+        let value: Value = serde_json::from_str(&five_point_wrapper_with_area(
+            &[json!({"lat": 39.9, "lon": 116.4, "glat": 39.9, "glon": 116.4})],
+            1_700_000_000_000,
+            &area,
+        ))
+        .unwrap();
+        assert_eq!(value["runAreaId"], -1);
+        assert_eq!(value["geoFencesJson"], area.geo_fences_json);
+        assert_eq!(value["freedomShowFence"], true);
+    }
+    #[test]
+    fn laps_are_rebuilt_from_fixed_altitude() {
         let points = vec![(38.901678, 121.540241), (38.902564, 121.541233)];
         let mut track = crate::track::generator::build(
             1200.0,
@@ -148,8 +609,92 @@ mod validation_tests {
         let laps = build_laps(&track, track.startTime);
         assert!(!laps.is_empty());
         assert!(laps.iter().all(|lap| lap["elevationGain"] == 0.0));
+        assert!(laps.iter().all(|lap| lap["elevationLoss"] == 0.0));
         assert!(laps.iter().all(|lap| lap["endAltAbs"] == 36.75));
         assert!(laps.iter().all(|lap| lap["endAltRel"] == 0.0));
+    }
+
+    #[test]
+    fn lap_stride_uses_distance_and_conserved_step_count() {
+        let track = crate::track::generator::build(
+            1000.0,
+            420,
+            42,
+            (38.9, 121.54),
+            1_700_000_000_000,
+            &[
+                (38.901678, 121.540241),
+                (38.902564, 121.541233),
+                (38.900921, 121.542310),
+                (38.899823, 121.541010),
+                (38.900455, 121.539512),
+            ],
+        );
+        let laps = build_laps(&track, track.startTime);
+        let lap = laps.last().expect("1000m route must have a lap summary");
+        let distance = lap["distance"].as_f64().unwrap();
+        let steps = lap["step"].as_i64().unwrap();
+        assert!(distance > 0.0);
+        assert!(steps > 0);
+        assert_eq!(steps, track.totalSteps);
+        assert_eq!(
+            lap["avgStride"].as_f64().unwrap(),
+            round_to(distance / steps as f64, 2)
+        );
+        assert_eq!(lap["avgPace"].as_f64().unwrap(), 420.0);
+    }
+
+    #[test]
+    fn laps_keep_positive_and_negative_elevation_separate() {
+        let mut track = crate::track::generator::build(
+            1200.0,
+            600,
+            7,
+            (38.9, 121.54),
+            1_700_000_000_000,
+            &[(38.901678, 121.540241), (38.902564, 121.541233)],
+        );
+        for (i, point) in track.locations.iter_mut().enumerate() {
+            point.bdA = match i % 3 {
+                0 => 10.0,
+                1 => 15.0,
+                _ => 12.0,
+            };
+        }
+        let laps = build_laps(&track, track.startTime);
+        let ascent: f64 = laps
+            .iter()
+            .map(|lap| lap["elevationGain"].as_f64().unwrap())
+            .sum();
+        let descent: f64 = laps
+            .iter()
+            .map(|lap| lap["elevationLoss"].as_f64().unwrap())
+            .sum();
+        let total = crate::track::altitude::total_ascent(&track.locations);
+        assert!(ascent > 0.0);
+        assert!(descent > 0.0);
+        assert_eq!(round_to(ascent, 2), total);
+    }
+
+    #[test]
+    fn cadence_windows_use_ordered_non_sentinel_ranges() {
+        let track = crate::track::generator::build(
+            1200.0,
+            600,
+            7,
+            (38.9, 121.54),
+            1_700_000_000_000,
+            &[(38.901678, 121.540241), (38.902564, 121.541233)],
+        );
+        let (_, step_freq) = build_windows(&track, 12345);
+        assert!(!step_freq.is_empty());
+        for window in step_freq {
+            let avg = window["avgDiff"].as_f64().unwrap();
+            let min = window["minDiff"].as_f64().unwrap();
+            let max = window["maxDiff"].as_f64().unwrap();
+            assert!(min <= avg && avg <= max);
+            assert_ne!((avg, min, max), (0.0, 1000.0, 0.0));
+        }
     }
 }
 
@@ -160,12 +705,17 @@ fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>) {
     let total_time = track.totalTime;
     let mut sp = Vec::new();
     let mut stf = Vec::new();
-    for (i, a) in track.speedPerTenSec.iter().enumerate() {
-        let b = &track.stepsPerTenSec[i];
-        let lo = (i * 10) as i64;
-        let hi = (i * 10 + 10) as i64;
-        let hi = hi.min(total_time);
+    let (speed_windows, step_windows) = track.ten_second_windows();
+    let mut lo = 0i64;
+    for (a, b) in speed_windows.iter().zip(&step_windows) {
+        let hi = (lo + a.time).min(total_time);
         let id = (rrid % 100000) * 1000 + hi;
+        let cadence = if a.time > 0 {
+            b.value / a.time as f64 * 60.0
+        } else {
+            0.0
+        };
+        let band = cadence_band(cadence);
         sp.push(json!({
             "beginTime": start_ms + lo * 1000,
             "distance": a.value,
@@ -176,32 +726,36 @@ fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>) {
             "state": 0,
         }));
         stf.push(json!({
-            "avgDiff": 0.0,
+            "avgDiff": round_to(band.avg, 2),
             "beginTime": start_ms + lo * 1000,
             "endTime": start_ms + hi * 1000,
             "flag": start_ms,
             "id": id,
-            "maxDiff": 0.0,
-            "minDiff": 1000.0,
+            "maxDiff": round_to(band.max, 2),
+            "minDiff": round_to(band.min, 2),
             "queueNum": 0,
             "state": 0,
             "stepsNum": b.value as i64,
         }));
+        lo = hi;
     }
     (sp, stf)
 }
 
-/// 圈（每 1000m 一圈，末圈 isFullLap=false；avgStride 单位厘米）。
+/// 圈（每 1000m 一圈，末圈 isFullLap=false；avgStride 单位米）。
 fn build_laps(track: &Track, start_ms: i64) -> Vec<Value> {
     let mut laps = Vec::new();
     let locs = &track.locations;
-    let (mut prev_d, mut prev_t, mut prev_steps, mut gain) = (0.0f64, 0i64, 0i64, 0.0f64);
+    let (mut prev_d, mut prev_t, mut prev_steps, mut gain, mut loss) =
+        (0.0f64, 0i64, 0i64, 0.0f64, 0.0f64);
     let alt0 = locs.first().map(|p| p.bdA).unwrap_or(0.0);
     for (i, pt) in locs.iter().enumerate() {
         if i > 0 {
             let dd = pt.bdA - locs[i - 1].bdA;
             if dd > 0.0 {
-                gain += dd;
+                gain += crate::track::altitude::positive_ascent_delta(dd);
+            } else {
+                loss += -dd;
             }
         }
         let d_now = pt.totalDis;
@@ -213,12 +767,13 @@ fn build_laps(track: &Track, start_ms: i64) -> Vec<Value> {
             let lap_steps = pt.steps - prev_steps;
             laps.push(json!({
                 "avgCadence": round_to(lap_steps as f64 / (lap_t as f64 / 60.0), 2),
-                "avgPace": round_to((lap_t as f64 / 60.0) / (lap_d / 1000.0).max(0.001), 2),
-                "avgStride": round_to(lap_d / 1.max(lap_steps) as f64 * 100.0, 2),
+                "avgPace": round_to(lap_t as f64 / (lap_d / 1000.0).max(0.001), 2),
+                "avgStride": round_to(lap_d / 1.max(lap_steps) as f64, 2),
                 "cumulativeDuration": t_now,
                 "distance": round_to(lap_d, 4),
                 "duration": lap_t,
                 "elevationGain": round_to(gain, 2),
+                "elevationLoss": round_to(loss, 2),
                 "endAltAbs": round_to(pt.bdA, 2),
                 "endAltRel": round_to(pt.bdA - alt0, 2),
                 "flag": start_ms,
@@ -231,9 +786,15 @@ fn build_laps(track: &Track, start_ms: i64) -> Vec<Value> {
             prev_t = t_now;
             prev_steps = pt.steps;
             gain = 0.0;
+            loss = 0.0;
         }
     }
+
     laps
+}
+
+pub(crate) fn build_laps_for_test(track: &Track, start_ms: i64) -> Vec<Value> {
+    build_laps(track, start_ms)
 }
 
 /// 组装 10 键 OBS 对象（值均 gzip+base64；segment_json/runFaceCheck 为空串 gzip）。
@@ -244,17 +805,48 @@ pub fn build_obs_object(
     uid: i64,
     live_points: &[Value],
 ) -> Value {
+    build_obs_object_with_area(track, rrid, uuid, uid, live_points, &RunAreaMeta::default())
+}
+
+/// Build the OBS payload with the same area metadata used by submission.
+pub fn build_obs_object_with_area(
+    track: &Track,
+    rrid: i64,
+    uuid: &str,
+    uid: i64,
+    live_points: &[Value],
+    area: &RunAreaMeta,
+) -> Value {
+    build_obs_object_with_area_and_track(track, rrid, uuid, uid, live_points, area)
+}
+
+/// Build OBS using the same route-aware checkpoint timestamps as the submit
+/// body.  The legacy function above remains for integrations that do not have
+/// live checkpoint metadata, while the run flow always uses this variant.
+pub fn build_obs_object_with_area_and_track(
+    track: &Track,
+    rrid: i64,
+    uuid: &str,
+    uid: i64,
+    live_points: &[Value],
+    area: &RunAreaMeta,
+) -> Value {
     let start_ms = track.startTime;
-    let pts: Vec<Value> = track.locations.iter().map(|p| conv_point(p, start_ms)).collect();
+    let pts: Vec<Value> = track
+        .locations
+        .iter()
+        .map(|p| conv_point(p, start_ms))
+        .collect();
     let run_wrap = json!({ "allLocJson": Value::Array(pts).to_string(), "useZip": false });
     let (sp, stf) = build_windows(track, rrid);
     let laps = build_laps(track, start_ms);
-    let five = five_point_payload(live_points, start_ms);
+    let five = five_point_payload_for_track(live_points, start_ms, track);
+    let area = payload_area(area);
     let fx = json!({
         "fivePointJson": Value::Array(five).to_string(),
-        "freedomShowFence": false,
-        "geoFencesJson": "[]",
-        "runAreaId": -1,
+        "freedomShowFence": area.freedom_show_fence,
+        "geoFencesJson": area.geo_fences_json,
+        "runAreaId": area.run_area_id,
         "useZip": false,
     });
     json!({

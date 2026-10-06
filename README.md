@@ -37,6 +37,14 @@
 ```text
 NekoSportsWorldTool login --user <手机号> --pass <密码> --remember
 NekoSportsWorldTool run                                  # 一键跑步（--altitude 17.2 固定海拔，或 11.6-22.8 映射到区间）
+
+NekoSportsWorldTool run --track-spec 400m                # 按 200m/300m/400m 标准跑道拟合；默认 auto
+NekoSportsWorldTool run --track-color full-green         # 全绿色兼容模式；也可选 half-green-gray
+
+
+NekoSportsWorldTool run --dry-run --dist 2 --pace 360 --lat 39.9 --lon 116.4
+                                                         # 本地生成并校验轨迹/五点/OBS，不登录、不联网、不上传
+
 NekoSportsWorldTool ai --sport 2 --score 26000           # AI 运动
 NekoSportsWorldTool rank main --type 1 --sort 1          # 排行榜
 NekoSportsWorldTool update [--check]           # 自动更新（--check 仅检查不下载）
@@ -47,7 +55,17 @@ NekoSportsWorldTool help                                 # 全部命令
 `template` 只读取用户手动选择的本地 GPX/JSON 文件，输出采样点、海拔范围、累计上升和累计下降，
 不会登录、访问服务器或把模板记录接入跑步上传流程。
 
+
+跑步页的手动海拔范围使用两个输入框：分别填写最低海拔和最高海拔，中间的连接符由界面自动显示；两项都留空则使用自动海拔。生成的海拔曲线会映射到该范围内，提交的累计爬升按轨迹中严格大于 0.15 米的上升差分累计，并保留两位小数；起点与终点差值作为净海拔变化，下降段单独累计。命令行 `--altitude` 仍支持单值或 `min-max` 形式。
+
+操场规格可在跑步页下拉框或命令行 `--track-spec` 选择。200 米、300 米、400 米分别按两条直道加两个半圆生成，跑道方向由服务器打卡点拟合，服务器围栏会作为边界校验；显式选择的规格无法落入围栏时会直接报错，避免静默生成错误路线；`auto` 才使用服务器点位环兼容路径。轨迹颜色选项只控制兼容模式和诊断日志，详情页最终的红、绿、灰分类仍由官方服务端根据轨迹字段判定。
+
+
+`run --dry-run` 使用本地经典轨迹生成器构造一条完整样本，校验坐标一致性、五点包装、OBS 字段和速度窗口；
+它不会创建登录客户端，也不会发起网络请求。`--lat` 与 `--lon` 可显式指定本地校验锚点，省略时使用已保存的设备锚点。
+
 手动海拔支持三种状态：留空使用自动海拔；填写单个数字（例如 `17.2`）让所有轨迹点使用固定海拔；填写区间（例如 `11.6-22.8`）将生成的海拔曲线映射到该上下限内，同时保留轨迹的相对起伏。
+
 
 青龙定时任务：首次手工 `login --remember` 一次，之后定时挂 `run` 即可。
 
@@ -67,6 +85,12 @@ NekoSportsWorldTool help                                 # 全部命令
 ```bash
 cargo build --release                        # GUI + CLI
 cargo build --release --no-default-features  # 仅 CLI
+```
+
+测试还包含脱敏日志、`data` 字符串/对象兼容解析，以及策略、排行榜和记录响应 fixture：
+
+```bash
+cargo test --all
 ```
 
 推 tag 自动构建 Windows / macOS / Linux 四平台产物并发布 Release（见 `.github/workflows/release.yml`）。

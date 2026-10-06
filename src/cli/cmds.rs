@@ -52,7 +52,7 @@ fn cmd_login(rest: &[&str]) -> i32 {
     let mut client = ApiClient::new(identity, None);
     let mut log = logger();
     match crate::api::login::login(&mut client, user, pw, &mut log) {
-        Ok(s) => {
+        Ok(_s) => {
             if get(&flags, "remember").is_some() {
                 let mut cfg = model::load_config();
                 cfg.username = user.to_string();
@@ -61,7 +61,7 @@ fn cmd_login(rest: &[&str]) -> i32 {
                 let _ = model::save_config(&cfg);
                 println!("凭据已保存（会话失效时自动重登）");
             }
-            println!("登录成功 uid={} unid={} name={}", s.uid, s.unid, s.name);
+            println!("登录成功（会话已建立，敏感身份字段已隐藏）");
             0
         }
         Err(e) => {
@@ -82,17 +82,32 @@ fn cmd_logout() -> i32 {
 
 fn cmd_run(rest: &[&str]) -> i32 {
     let flags = parse_flags(rest);
-    let mut client = match make_client() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
+
+    let dry_run = get(&flags, "dry-run").is_some();
+    // Keep explicit values bounded before they reach the point generator.
+    let dist_km = match get(&flags, "dist") {
+        None => 0.0,
+        Some(value) => match value.parse::<f32>() {
+            Ok(value) if value.is_finite() && value > 0.0 && value <= 50.0 => value,
+            _ => {
+                eprintln!("--dist must be finite, > 0 and <= 50 km");
+                return 1;
+            }
+        },
+    };
+    let pace = match get(&flags, "pace") {
+        None => 0.0,
+        Some(value) => {
+            let pace = parse_pace(value);
+            if pace.is_finite() && pace > 0.0 && pace <= 1200.0 {
+                pace
+            } else {
+                eprintln!("--pace must be finite, > 0 and <= 1200 sec/km");
+                return 1;
+            }
         }
     };
-    let dist_km: f32 = get(&flags, "dist")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.0);
-    let pace: f32 = get(&flags, "pace").map(parse_pace).unwrap_or(0.0);
+
     let ago_min: i64 = get(&flags, "ago").and_then(|v| v.parse().ok()).unwrap_or(0);
     let days_ago: i64 = get(&flags, "days-ago")
         .and_then(|v| v.parse().ok())
@@ -113,6 +128,36 @@ fn cmd_run(rest: &[&str]) -> i32 {
             }
         },
         None => (None, None),
+    };
+    let track_color_mode = match get(&flags, "track-color") {
+        None => crate::api::model::TrackColorMode::FullGreen,
+        Some("mixed") | Some("gray") | Some("grey") | Some("half-green-gray") => {
+            crate::api::model::TrackColorMode::HalfGreenGray
+        }
+        Some("green") | Some("full-green") | Some("full_green") => {
+            crate::api::model::TrackColorMode::FullGreen
+        }
+        Some(value) => {
+            eprintln!("--track-color 必须是 full-green 或 half-green-gray（收到 {value}）");
+            return 1;
+        }
+    };
+    let custom_track_length = get(&flags, "track-length").and_then(|v| v.parse::<u32>().ok());
+    if get(&flags, "track-length").is_some() && custom_track_length.is_none() {
+        eprintln!("--track-length 必须是 100-1000 米之间的整数");
+        return 1;
+    }
+    let track_spec = match get(&flags, "track-spec") {
+        None => crate::track::stadium::TrackSpec::Auto,
+        Some(value) => {
+            match crate::track::stadium::TrackSpec::parse_with_length(value, custom_track_length) {
+                Some(spec) => spec,
+                None => {
+                    eprintln!("--track-spec 必须是 auto、200、300、400 或 custom（也接受 200m/300m/400m；custom 需同时提供 --track-length 100-1000）");
+                    return 1;
+                }
+            }
+        }
     };
     let seed: u64 = get(&flags, "seed")
         .and_then(|v| v.parse().ok())
@@ -175,17 +220,99 @@ fn cmd_run(rest: &[&str]) -> i32 {
         face_check: face as i64,
         manual_altitude,
         manual_altitude_range,
+        track_color_mode,
+        track_spec,
         seed,
         route_mode,
+    };
+
+    if dry_run {
+        if matches!(
+            params.route_mode,
+            crate::track::generate_road::RouteMode::Road
+        ) {
+            eprintln!("--dry-run 当前只校验经典轨迹生成器，请省略 --route road");
+            return 1;
+        }
+        let identity = model::load_identity();
+        let anchor = match (get(&flags, "lat"), get(&flags, "lon")) {
+            (Some(lat), Some(lon)) => {
+                let lat = match lat.parse::<f64>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        eprintln!("--lat 必须是数字");
+                        return 1;
+                    }
+                };
+                let lon = match lon.parse::<f64>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        eprintln!("--lon 必须是数字");
+                        return 1;
+                    }
+                };
+                match crate::location::Coordinate::new(lat, lon, 0.0) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        eprintln!("坐标无效: {e}");
+                        return 1;
+                    }
+                }
+            }
+            (None, None) => match identity.anchor_coordinate() {
+                Ok(value) => value,
+                Err(e) => {
+                    eprintln!("本地设备锚点无效: {e}");
+                    return 1;
+                }
+            },
+            _ => {
+                eprintln!("--lat 和 --lon 必须同时提供");
+                return 1;
+            }
+        };
+        println!("本地 dry-run：不登录、不联网、不上传");
+        println!("校验锚点：{:.6}, {:.6}", anchor.latitude, anchor.longitude);
+        return match crate::api::flow::run_dry_run(&params, anchor) {
+            Ok(summary) => {
+                println!(
+                    "dry-run 通过：{:.0}m / {}s / {} 个轨迹点 / {} 个 OBS key",
+                    summary.distance_m, summary.duration_s, summary.track_points, summary.obs_keys
+                );
+                println!(
+                    "起点：{:.6}, {:.6}；速度范围：{:.3}–{:.3} m/s",
+                    summary.start_latitude,
+                    summary.start_longitude,
+                    summary.min_speed_mps,
+                    summary.max_speed_mps
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("dry-run 校验失败: {e}");
+                1
+            }
+        };
+    }
+
+    let mut client = match make_client() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
     };
     match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
         Ok(out) => {
             println!(
-                "跑步提交成功 rrid={} uuid={} obs={}/2 verify={}",
+                "跑步提交成功 rrid={} uuid={} obs_upload={}/2 obs_roundtrip={} detail_request={} detail_complete={} detail_checks_passed={}",
                 out.result.rrid,
                 out.result.uuid,
-                out.obs_ok,
-                if out.detail_ok { "通过" } else { "未通过" }
+                out.obs_upload,
+                out.obs_roundtrip,
+                out.detail_request,
+                out.detail_complete,
+                out.detail_checks_passed,
             );
             0
         }
@@ -342,16 +469,22 @@ fn cmd_records_raw(rest: &[&str]) -> i32 {
             } else if n > 0 {
                 println!(
                     "首条: {}",
-                    &arr[0].to_string()[..arr[0].to_string().len().min(300)]
+                    crate::textlog::redact_text(
+                        &arr[0].to_string()[..arr[0].to_string().len().min(300)],
+                    )
                 );
                 println!(
                     "末条: {}",
-                    &arr[n - 1].to_string()[..arr[n - 1].to_string().len().min(300)]
+                    crate::textlog::redact_text(
+                        &arr[n - 1].to_string()[..arr[n - 1].to_string().len().min(300)],
+                    )
                 );
             } else {
                 println!(
                     "data: {}",
-                    data.to_string()[..data.to_string().len().min(500)].to_string()
+                    crate::textlog::redact_text(
+                        &data.to_string()[..data.to_string().len().min(500)],
+                    )
                 );
             }
             0
@@ -377,7 +510,7 @@ fn cmd_obs_get(rest: &[&str]) -> i32 {
             return 1;
         }
     };
-    let mut log = |s: &str| eprintln!("{s}");
+    let mut log = |s: &str| println!("{}", crate::textlog::clean(s));
     match crate::api::obs::fetch_object(&mut client, key, &mut log) {
         Ok(v) => {
             let out = get(&flags, "out").unwrap_or("obs_real.json");
@@ -450,7 +583,7 @@ fn cmd_obs_sample(rest: &[&str]) -> i32 {
             return 1;
         }
     };
-    let mut log = |s: &str| eprintln!("{s}");
+    let mut log = |s: &str| println!("{}", crate::textlog::clean(s));
     let anchor = match client.identity.anchor_coordinate() {
         Ok(value) => value,
         Err(e) => {
@@ -505,7 +638,10 @@ fn cmd_record_info(rest: &[&str]) -> i32 {
         }
     };
     match crate::api::records::fetch_one_record(&mut client, rrid) {
-        Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+        Ok(v) => println!(
+            "{}",
+            crate::textlog::redact_text(&serde_json::to_string_pretty(&v).unwrap_or_default())
+        ),
         Err(e) => {
             eprintln!("拉取失败: {e}");
             return 1;
@@ -529,7 +665,10 @@ fn cmd_ai_info(rest: &[&str]) -> i32 {
         }
     };
     match crate::api::ai::fetch_record_detail(&mut client, id) {
-        Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+        Ok(v) => println!(
+            "{}",
+            crate::textlog::redact_text(&serde_json::to_string_pretty(&v).unwrap_or_default())
+        ),
         Err(e) => {
             eprintln!("拉取失败: {e}");
             return 1;
@@ -607,7 +746,10 @@ fn cmd_semester() -> i32 {
                 );
             }
             if !r.personal_raw.is_null() {
-                println!("个人完成度：{}", r.personal_raw);
+                println!(
+                    "个人完成度：{}",
+                    crate::textlog::redact_text(&r.personal_raw.to_string())
+                );
             }
             0
         }

@@ -14,6 +14,31 @@ pub struct PolicyInfo {
     pub valid_time: i64,
     /// 必经点（BD 系，与打卡点同系），policy 响应里若有则返回。
     pub must_points: Vec<(f64, f64)>,
+    pub area: crate::track::wire::RunAreaMeta,
+}
+
+/// 将已解密的业务响应解析为稳定的策略模型，供网络路径和 fixture 测试共用。
+pub(crate) fn parse_policy_response(biz: &Value) -> Result<PolicyInfo, String> {
+    let timestamp = get_field(biz, "timestamp")
+        .and_then(|t| t.as_i64())
+        .ok_or("policy 响应缺 timestamp")?;
+    let policy = get_field(biz, "policy")
+        .and_then(|t| t.as_i64())
+        .unwrap_or(0);
+    let rule = get_field(biz, "runRuleModel")
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(PolicyInfo {
+        timestamp,
+        policy,
+        min_distance: rule
+            .get("minDistance")
+            .and_then(|t| t.as_i64())
+            .unwrap_or(1000),
+        valid_time: rule.get("validTime").and_then(|t| t.as_i64()).unwrap_or(0),
+        must_points: extract_must_points(biz),
+        area: super::points::area_from_payload(biz, &[]),
+    })
 }
 
 /// 从 policy 响应 `data` 中防御式提取必经点列表（字段名不确定，逐个尝试）。
@@ -60,23 +85,6 @@ pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
     })
     .to_string();
     let biz = client.call("POST", POLICY_PATH, &body, &[])?;
-    let timestamp = get_field(&biz, "timestamp")
-        .and_then(|t| t.as_i64())
-        .ok_or("policy 响应缺 timestamp")?;
-    let policy = get_field(&biz, "policy")
-        .and_then(|t| t.as_i64())
-        .unwrap_or(0);
-    let rule = get_field(&biz, "runRuleModel")
-        .cloned()
-        .unwrap_or(Value::Null);
-    Ok(PolicyInfo {
-        timestamp,
-        policy,
-        min_distance: rule
-            .get("minDistance")
-            .and_then(|t| t.as_i64())
-            .unwrap_or(1000),
-        valid_time: rule.get("validTime").and_then(|t| t.as_i64()).unwrap_or(0),
-        must_points: extract_must_points(&biz),
-    })
+
+    parse_policy_response(&biz)
 }

@@ -4,14 +4,13 @@
 use super::client::{check_business, ureq_err, ApiClient};
 use super::model::HOST;
 use crate::crypto::decrypt::{decrypt_response, derive_paes_key};
-use crate::crypto::envelope::{
-    build_envelope, build_envelope_ts, rsa_public_key, OuterOrder,
-};
+use crate::crypto::envelope::{build_envelope, build_envelope_ts, rsa_public_key, OuterOrder};
 use crate::crypto::header::{build_android_header, HeaderIdentity, UA_ANDROID};
 use crate::crypto::sign::{original_sign, signature};
+use crate::track::altitude;
 use crate::track::calorie::{avg_power, official_kcal};
 use crate::track::geom::round_to;
-use crate::track::model::{GenPoint, Track};
+use crate::track::model::{cadence_band, GenPoint, Track};
 use crate::track::wire::validate_five_point_wrapper;
 use serde_json::{json, Map, Value};
 
@@ -19,61 +18,75 @@ pub const RECORD_PATH: &str = "/api/v70260/runnings/save/record";
 
 /// Android 10s 窗（id 种子 60000）。
 fn android_tensec(track: &Track, start_ms: i64, kind: &str) -> Vec<Value> {
-    let locs = &track.locations;
-    let total_time = track.totalTime;
     let mut out = Vec::new();
     let rid_seed = 60000i64;
-    let mut w = 10i64;
-    while w <= total_time {
-        let lo = w - 10;
-        let hi = w.min(total_time);
-        let mut d_lo = 0.0f64;
-        let mut s_lo = 0i64;
-        let mut d_hi = 0.0f64;
-        let mut s_hi = 0i64;
-        for p in locs {
-            let tt = p.totalTime;
-            if tt <= lo {
-                d_lo = p.totalDis;
-                s_lo = p.steps;
-            }
-            if tt <= hi {
-                d_hi = p.totalDis;
-                s_hi = p.steps;
-            }
-        }
-        let dist = round_to((d_hi - d_lo).max(0.0), 4);
-        let steps_n = (s_hi - s_lo).max(0);
+    let (speed_windows, step_windows) = track.ten_second_windows();
+    let windows = if kind == "speed" {
+        speed_windows
+    } else {
+        step_windows
+    };
+    let mut lo = 0i64;
+    for (qn, window) in windows.iter().enumerate() {
+        let hi = (lo + window.time).min(track.totalTime);
         let begin = start_ms + lo * 1000;
         let end = start_ms + hi * 1000;
-        let qn = w / 10 - 1;
         if kind == "speed" {
             out.push(json!({
-                "beginTime": begin, "distance": dist, "endTime": end,
-                "flag": start_ms, "id": rid_seed + qn, "queueNum": qn, "state": 0,
+                "beginTime": begin, "distance": window.value, "endTime": end,
+                "flag": start_ms, "id": rid_seed + qn as i64, "queueNum": qn, "state": 0,
             }));
         } else {
+            let cadence = if window.time > 0 {
+                window.value / window.time as f64 * 60.0
+            } else {
+                0.0
+            };
+            let band = cadence_band(cadence);
             out.push(json!({
-                "avgDiff": 0.0, "beginTime": begin, "endTime": end,
-                "flag": start_ms, "id": rid_seed + qn, "maxDiff": 0.0,
-                "minDiff": 1000.0, "queueNum": qn, "state": 0, "stepsNum": steps_n,
+                "avgDiff": round_to(band.avg, 2), "beginTime": begin, "endTime": end,
+                "flag": start_ms, "id": rid_seed + qn as i64,
+                "maxDiff": round_to(band.max, 2),
+                "minDiff": round_to(band.min, 2),
+                "queueNum": qn, "state": 0, "stepsNum": window.value as i64,
             }));
         }
-        w += 10;
+        lo = hi;
     }
     out
 }
 
-/// bdA 正差分累计。
+fn average_step_frequency(total_steps: i64, total_time: i64) -> i64 {
+    (total_steps as f64 / total_time as f64 * 60.0).round() as i64
+}
+
+/// bdA 正差分累计，忽略不超过 0.15m 的传感器噪声。
 pub fn total_ascent(locs: &[GenPoint]) -> f64 {
-    let mut ascent = 0.0;
-    for i in 1..locs.len() {
-        let d = locs[i].bdA - locs[i - 1].bdA;
-        if d > 0.0 {
-            ascent += d;
-        }
+    altitude::total_ascent(locs)
+}
+
+/// Server unit: thousandths of a minute per kilometre.
+pub fn pace_speed_value(total_time_s: i64, distance_m: f64) -> i64 {
+    let distance_m = (distance_m * 100.0).ceil() / 100.0;
+    if distance_m <= 0.0 {
+        return 0;
     }
-    ascent
+    (total_time_s as f64 / distance_m * 50.0 / 3.0 * 1000.0).round() as i64
+}
+
+/// Cumulative negative elevation deltas.
+pub fn total_descent(locs: &[GenPoint]) -> f64 {
+    locs.windows(2)
+        .map(|pair| (pair[0].bdA - pair[1].bdA).max(0.0))
+        .sum()
+}
+
+/// End elevation minus start elevation.
+pub fn net_elevation_change(locs: &[GenPoint]) -> f64 {
+    match (locs.first(), locs.last()) {
+        (Some(first), Some(last)) => last.bdA - first.bdA,
+        _ => 0.0,
+    }
 }
 
 pub struct SubmitParams {
@@ -105,10 +118,16 @@ pub struct SubmitResult {
 }
 
 /// 提交跑步记录（sportType=1 自由跑 + 实时五点）。
-pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnMut(&str)) -> Result<SubmitResult, String> {
+pub fn submit_record(
+    client: &mut ApiClient,
+    p: &SubmitParams,
+    log: &mut dyn FnMut(&str),
+) -> Result<SubmitResult, String> {
     let track = &p.track;
     let start_coordinate = track.validate_consistency()?;
-    if p.five_point_json.is_empty() { return Err("五点轨迹不能为空".into()); }
+    if p.five_point_json.is_empty() {
+        return Err("五点轨迹不能为空".into());
+    }
     validate_five_point_wrapper(&p.five_point_json)?;
     let total_time = track.totalTime;
     let total_dis = track.totalDistance;
@@ -122,9 +141,8 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     let run_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
     let unid = p.selected_unid;
 
-    let dis_ceil = (total_dis * 100.0).ceil() / 100.0;
-    let speed = (round_to(total_time as f64 / dis_ceil * 50.0 / 3.0, 2) * 1024.0) as i64;
-    let avg_step_freq = 1i64.max(round_to(total_steps as f64 / total_time as f64 * 60.0, 0) as i64);
+    let speed = pace_speed_value(total_time, total_dis);
+    let avg_step_freq = average_step_frequency(total_steps, total_time);
 
     let mut body = Map::new();
     body.insert("allLocJson".into(), Value::String(String::new()));
@@ -140,9 +158,15 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     body.insert("selectedUnid".into(), Value::from(unid));
     body.insert("selRunTime".into(), Value::from(total_time));
     body.insert("selDistance".into(), Value::from(p.min_distance));
-    body.insert("totalDis".into(), Value::from(round_to(total_dis, 0) as i64));
+    body.insert(
+        "totalDis".into(),
+        Value::from(round_to(total_dis, 0) as i64),
+    );
     body.insert("speed".into(), Value::from(speed));
-    body.insert("validDis".into(), Value::from(round_to(total_dis, 0) as i64));
+    body.insert(
+        "validDis".into(),
+        Value::from(round_to(total_dis, 0) as i64),
+    );
     body.insert("validTime".into(), Value::from(total_time));
     body.insert("complete".into(), Value::Bool(true));
     body.insert("unCompleteReason".into(), Value::from(0));
@@ -151,10 +175,16 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     body.insert("avgStepFreq".into(), Value::from(avg_step_freq));
     body.insert("useMobilityTools".into(), Value::from(0));
     body.insert("faceCheck".into(), Value::from(p.face_check));
-    body.insert("totalAscent".into(), Value::from(round_to(ascent, 0) as i64));
+    body.insert("totalAscent".into(), Value::from(round_to(ascent, 2)));
     body.insert("avgPower".into(), Value::from(power));
-    body.insert("speedPerTenSec".into(), Value::Array(android_tensec(track, start_ms, "speed")));
-    body.insert("stepsPerTenSec".into(), Value::Array(android_tensec(track, start_ms, "steps")));
+    body.insert(
+        "speedPerTenSec".into(),
+        Value::Array(android_tensec(track, start_ms, "speed")),
+    );
+    body.insert(
+        "stepsPerTenSec".into(),
+        Value::Array(android_tensec(track, start_ms, "steps")),
+    );
     body.insert("isUpload".into(), Value::Bool(false));
     body.insert("more".into(), Value::Bool(false));
     body.insert("latitude".into(), Value::from(start_coordinate.latitude));
@@ -162,7 +192,10 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     body.insert("maxRunTime".into(), Value::from(0));
     body.insert("minSteps".into(), Value::from(0));
     if !p.five_point_json.is_empty() {
-        body.insert("fivePointJson".into(), Value::String(p.five_point_json.clone()));
+        body.insert(
+            "fivePointJson".into(),
+            Value::String(p.five_point_json.clone()),
+        );
     }
     // Android 必现扩展字段
     body.insert("errorCode".into(), Value::from(0));
@@ -170,7 +203,10 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     body.insert("unauthorized".into(), Value::from(0));
     body.insert("themeId".into(), Value::from(0));
     body.insert("goalId".into(), Value::Null);
-    body.insert("address".into(), Value::String(p.address.trim().to_string()));
+    body.insert(
+        "address".into(),
+        Value::String(p.address.trim().to_string()),
+    );
 
     let body_val = Value::Object(body.clone());
     let sig = signature(&body_val, false);
@@ -191,10 +227,16 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
         device_name: "22081212C".into(),
         ..client.identity.clone()
     };
-    let (hp, hp_extra) = build_android_header(&android_identity, p.uid, &client_token(client), None);
+    let (hp, hp_extra) =
+        build_android_header(&android_identity, p.uid, &client_token(client), None);
     let header_env = build_envelope(&mut client.session, &hp, OuterOrder::Observed);
     let now = crate::crypto::envelope::now_ms();
-    let body_env = build_envelope_ts(&mut client.session, &body_plain, OuterOrder::Insert, now + 1);
+    let body_env = build_envelope_ts(
+        &mut client.session,
+        &body_plain,
+        OuterOrder::Insert,
+        now + 1,
+    );
 
     let runes = format!("{}{}", p.policy_ts, p.uid);
     let runef = format!("{}{}", run_uuid, start_ms);
@@ -212,15 +254,23 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
     let resp = req.send_string(&body_env.json).map_err(ureq_err)?;
     let status = resp.status();
     let raw = resp.into_string().unwrap_or_default();
-    log(&format!("[record] sportType=1 HTTP {status} len={}", raw.len()));
+    log(&format!(
+        "[record] sportType=1 HTTP {status} len={}",
+        raw.len()
+    ));
 
     let key = derive_paes_key(
-        &body_env.key_data[0], &body_env.key_data[1], &body_env.key_data[2], &body_env.key_data[3],
+        &body_env.key_data[0],
+        &body_env.key_data[1],
+        &body_env.key_data[2],
+        &body_env.key_data[3],
     );
     let dec = decrypt_response(raw.as_bytes(), &key, &rsa_public_key())
         .map_err(|e| format!("提交响应解密失败: {e}"))?;
     let biz = check_business(&dec.business)?;
-    let rrid = super::client::get_field(&biz, "rrid").and_then(|v| v.as_i64()).unwrap_or(0);
+    let rrid = super::client::get_field(&biz, "rrid")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     if rrid <= 0 {
         return Err(format!("提交未返回 rrid: {}", truncate_json(&biz)));
     }
@@ -241,10 +291,127 @@ pub fn submit_record(client: &mut ApiClient, p: &SubmitParams, log: &mut dyn FnM
 }
 
 fn client_token(client: &ApiClient) -> String {
-    client.login.as_ref().map(|s| s.token.clone()).unwrap_or_default()
+    client
+        .login
+        .as_ref()
+        .map(|s| s.token.clone())
+        .unwrap_or_default()
 }
 
 fn truncate_json(v: &Value) -> String {
     let s = v.to_string();
     s.chars().take(240).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        android_tensec, average_step_frequency, net_elevation_change, pace_speed_value,
+        total_ascent, total_descent,
+    };
+
+    fn sample_track() -> crate::track::model::Track {
+        crate::track::generator::build(
+            1000.0,
+            374,
+            42,
+            (38.9, 121.54),
+            1_788_958_186_123,
+            &[
+                (38.901678, 121.540241),
+                (38.902564, 121.541233),
+                (38.900921, 121.542310),
+                (38.899823, 121.541010),
+                (38.900455, 121.539512),
+            ],
+        )
+    }
+
+    #[test]
+    fn average_step_frequency_uses_rounded_total_steps_over_actual_time() {
+        assert_eq!(
+            average_step_frequency(773, 374),
+            (773.0f64 / 374.0 * 60.0).round() as i64
+        );
+        assert_eq!(average_step_frequency(7, 8), 53);
+    }
+
+    #[test]
+    fn android_submit_windows_keep_four_second_tail_and_conserve_totals() {
+        let track = sample_track();
+        let start_ms = track.startTime;
+        let speed = android_tensec(&track, start_ms, "speed");
+        let steps = android_tensec(&track, start_ms, "steps");
+        assert_eq!(speed.len(), 38);
+        assert_eq!(steps.len(), 38);
+        for index in 0..37 {
+            assert_eq!(speed[index]["beginTime"], start_ms + index as i64 * 10_000);
+            assert_eq!(
+                speed[index]["endTime"],
+                start_ms + (index as i64 + 1) * 10_000
+            );
+            assert_eq!(steps[index]["beginTime"], speed[index]["beginTime"]);
+            assert_eq!(steps[index]["endTime"], speed[index]["endTime"]);
+        }
+        assert_eq!(speed[37]["beginTime"], start_ms + 370_000);
+        assert_eq!(speed[37]["endTime"], start_ms + 374_000);
+        assert_eq!(steps[37]["beginTime"], start_ms + 370_000);
+        assert_eq!(steps[37]["endTime"], start_ms + 374_000);
+        assert!(
+            (speed
+                .iter()
+                .map(|window| window["distance"].as_f64().unwrap())
+                .sum::<f64>()
+                - 1000.0)
+                .abs()
+                < 0.01
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .map(|window| window["stepsNum"].as_i64().unwrap())
+                .sum::<i64>(),
+            track.totalSteps
+        );
+        for window in steps {
+            let avg = window["avgDiff"].as_f64().unwrap();
+            let min = window["minDiff"].as_f64().unwrap();
+            let max = window["maxDiff"].as_f64().unwrap();
+            assert!(min <= avg && avg <= max);
+            assert_ne!((avg, min, max), (0.0, 1000.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn elevation_stats_use_positive_and_negative_deltas() {
+        let mut track = sample_track();
+        let mut points = Vec::new();
+        for (i, altitude) in [10.0, 15.0, 12.0, 18.0].iter().copied().enumerate() {
+            let mut point = track.locations[0].clone();
+            point.totalTime = i as i64 + 1;
+            point.bdA = altitude;
+            points.push(point);
+        }
+        track.locations = points;
+        let expected_ascent = 11.0;
+        let expected_descent: f64 = track
+            .locations
+            .windows(2)
+            .map(|pair| (pair[0].bdA - pair[1].bdA).max(0.0))
+            .sum();
+        assert_eq!(total_ascent(&track.locations), expected_ascent);
+        assert!((total_descent(&track.locations) - expected_descent).abs() < 1e-9);
+        assert!(
+            (net_elevation_change(&track.locations)
+                - (track.locations.last().unwrap().bdA - track.locations.first().unwrap().bdA))
+                .abs()
+                < 1e-9
+        );
+    }
+
+    #[test]
+    fn pace_uses_thousandths_of_minute_per_kilometre() {
+        assert_eq!(pace_speed_value(2295, 5030.0), 7604);
+        assert!((pace_speed_value(2295, 5030.0) as f64 / 1000.0 - 7.604).abs() < 0.001);
+    }
 }

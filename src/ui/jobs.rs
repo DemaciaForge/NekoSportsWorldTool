@@ -125,7 +125,10 @@ impl App {
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
             match crate::api::points::fetch_points(&mut client, anchor, &mut log) {
                 Ok(pts) => {
-                    log(&format!("√ [points] 点位已缓存 {} 个（供路线预览）", pts.len()));
+                    log(&format!(
+                        "√ [points] 点位已缓存 {} 个（供路线预览）",
+                        pts.len()
+                    ));
                     tx.send(POINTS_DONE.to_string()).ok();
                 }
                 Err(e) => log(&format!("⚠ [points] 点位获取失败: {e}")),
