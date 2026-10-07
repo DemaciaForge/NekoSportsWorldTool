@@ -4,6 +4,8 @@ param(
     [string]$OutputDirectory = "diagnostics/windows-startup",
     [ValidateSet("full", "cli")]
     [string]$Mode = "full",
+    [switch]$UseSoftwareOpenGL,
+    [string]$MesaArchive,
     [ValidateRange(70, 300)]
     [int]$StartupSeconds = 70
 )
@@ -35,10 +37,47 @@ function New-SmokeProcess([string]$Executable, [string]$Arguments) {
     $info.StandardOutputEncoding = [Text.Encoding]::UTF8
     $info.StandardErrorEncoding = [Text.Encoding]::UTF8
     $info.EnvironmentVariables["RUST_BACKTRACE"] = "1"
+    if ($UseSoftwareOpenGL -and $Mode -eq "full") {
+        $info.EnvironmentVariables["GALLIUM_DRIVER"] = "llvmpipe"
+        $info.EnvironmentVariables["LIBGL_ALWAYS_SOFTWARE"] = "true"
+        $info.EnvironmentVariables["WGL_DISABLE_ERROR_DIALOGS"] = "1"
+        $info.EnvironmentVariables["MESA_SHADER_CACHE_DIR"] = Join-Path $isolatedPath "mesa-shader-cache"
+    }
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $info
     if (-not $process.Start()) { throw "Could not start the packaged executable." }
     return $process
+}
+
+function Install-SmokeSoftwareOpenGL([string]$DataPath) {
+    # Mesa documents per-application DLL deployment and llvmpipe selection:
+    # https://docs.mesa3d.org/drivers/llvmpipe.html#windows
+    # https://docs.mesa3d.org/envvars.html#gallium-driver
+    # This fixed asset's digest was verified against the publisher's release API:
+    # https://github.com/pal1000/mesa-dist-win/releases/tag/26.2.4
+    $mesaUrl = "https://github.com/pal1000/mesa-dist-win/releases/download/26.2.4/mesa3d-26.2.4-release-msvc.7z"
+    $expectedHash = "351fc8c8b695878ffb3eaa044b3ead08672a48b1a045e3c3e3975811df0f6695"
+    if ($MesaArchive) {
+        $mesaArchivePath = (Resolve-Path -LiteralPath $MesaArchive).Path
+    }
+    else {
+        $mesaArchivePath = Join-Path $isolatedPath "mesa3d-26.2.4-release-msvc.7z"
+        Invoke-WebRequest -Uri $mesaUrl -OutFile $mesaArchivePath -TimeoutSec 180
+    }
+    $actualHash = (Get-FileHash -LiteralPath $mesaArchivePath -Algorithm SHA256).Hash
+    if ($actualHash -ne $expectedHash) { throw "Mesa3D archive SHA256 did not match the pinned digest." }
+    "Test renderer: Mesa3D 26.2.4 llvmpipe; archive SHA256 $actualHash" | Add-Content -LiteralPath $summaryPath
+    $mesaPath = Join-Path $isolatedPath "mesa-driver"
+    New-Item -ItemType Directory -Path $mesaPath | Out-Null
+    # Extract only the two OpenGL DLLs. Never execute the package's deployment tools.
+    tar.exe -xf $mesaArchivePath -C $mesaPath x64/opengl32.dll x64/libgallium_wgl.dll
+    if ($LASTEXITCODE -ne 0) { throw "Could not extract the pinned Mesa3D test DLLs." }
+    foreach ($name in @("opengl32.dll", "libgallium_wgl.dll")) {
+        $source = Join-Path (Join-Path $mesaPath "x64") $name
+        $destination = Join-Path $DataPath $name
+        if (Test-Path -LiteralPath $destination) { throw "Refusing to overwrite a DLL from the release archive: $name" }
+        Copy-Item -LiteralPath $source -Destination $destination
+    }
 }
 
 function Invoke-SmokeCommand([string]$Executable, [string]$Arguments, [string]$Name) {
@@ -83,6 +122,7 @@ try {
     }
 
     if ($Mode -eq "full") {
+        if ($UseSoftwareOpenGL) { Install-SmokeSoftwareOpenGL $dataPath }
         $guiProcess = New-SmokeProcess $executable ""
         $guiStdout = $guiProcess.StandardOutput.ReadToEndAsync()
         $guiStderr = $guiProcess.StandardError.ReadToEndAsync()
@@ -91,7 +131,17 @@ try {
         while ($timer.Elapsed.TotalSeconds -lt $StartupSeconds) {
             $guiProcess.Refresh()
             if ($guiProcess.HasExited) { throw "GUI exited during startup with code $($guiProcess.ExitCode)." }
-            if ($guiProcess.MainWindowHandle -ne [IntPtr]::Zero) { $windowSeen = $true }
+            if (-not $windowSeen -and $guiProcess.MainWindowHandle -ne [IntPtr]::Zero) {
+                $windowSeen = $true
+                "GUI window created after $([Math]::Round($timer.Elapsed.TotalSeconds, 1)) seconds." | Add-Content -LiteralPath $summaryPath
+                if ($UseSoftwareOpenGL) {
+                    $loadedDriver = @($guiProcess.Modules | Where-Object {
+                        $_.ModuleName -eq "libgallium_wgl.dll" -and $_.FileName -eq (Join-Path $dataPath "libgallium_wgl.dll")
+                    })
+                    if ($loadedDriver.Count -ne 1) { throw "GUI did not load the isolated Mesa3D software OpenGL driver." }
+                    "Confirmed isolated libgallium_wgl.dll was loaded by the GUI process." | Add-Content -LiteralPath $summaryPath
+                }
+            }
             if (-not $windowSeen -and $timer.Elapsed.TotalSeconds -ge 20) {
                 throw "GUI did not create a window within 20 seconds; the runner may lack a usable graphical environment."
             }

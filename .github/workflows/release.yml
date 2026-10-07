@@ -148,7 +148,7 @@ jobs:
       - name: Verify final Windows ZIP startup
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/smoke-windows.ps1 -Archive "dist/$env:ARTIFACT.zip" -OutputDirectory diagnostics/windows-startup -Mode $env:MODE
+        run: ./scripts/smoke-windows.ps1 -Archive "dist/$env:ARTIFACT.zip" -OutputDirectory diagnostics/windows-startup -Mode $env:MODE -UseSoftwareOpenGL
 
       - name: Preserve Windows startup diagnostics
         if: always() && runner.os == 'Windows'
