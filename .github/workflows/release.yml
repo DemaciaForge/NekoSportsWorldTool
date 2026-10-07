@@ -14,6 +14,7 @@ name: Release
 
 on:
   push:
+    branches: ["integrate/pr34-pr35-pr36-issue38"]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -27,7 +28,47 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    name: Windows unit and regression tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check changed Rust files and locked metadata
+        shell: pwsh
+        run: |
+          rustfmt --check --edition 2021 src/textlog.rs src/ui/log.rs src/api/flow.rs src/track/altitude.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo metadata --locked --no-deps --format-version 1 > $null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run full locked Cargo tests
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force diagnostics | Out-Null
+          cargo test --all --locked *>&1 | Tee-Object diagnostics/cargo-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Preserve test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-cargo-test-diagnostics
+          path: diagnostics/*
+          if-no-files-found: ignore
+
   build:
+    needs: verify
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -62,6 +103,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ env.MODE }}
+
       - name: Install cross (Linux 交叉编译)
         if: matrix.cross == true
         uses: taiki-e/install-action@v2
@@ -72,9 +117,9 @@ jobs:
         if: env.MODE == 'cli'
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target "$TARGET" --no-default-features
+            cross build --locked --release --target "$TARGET" --no-default-features
           else
-            cargo build --release --target "$TARGET" --no-default-features
+            cargo build --locked --release --target "$TARGET" --no-default-features
           fi
         shell: bash
 
@@ -82,9 +127,9 @@ jobs:
         if: env.MODE == 'full'
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target "$TARGET"
+            cross build --locked --release --target "$TARGET"
           else
-            cargo build --release --target "$TARGET"
+            cargo build --locked --release --target "$TARGET"
           fi
         shell: bash
 
@@ -99,6 +144,19 @@ jobs:
           else
             tar czf "dist/$ARTIFACT.tar.gz" -C "$(dirname "$BIN")" "$(basename "$BIN")"
           fi
+
+      - name: Verify final Windows ZIP startup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke-windows.ps1 -Archive "dist/$env:ARTIFACT.zip" -OutputDirectory diagnostics/windows-startup -Mode $env:MODE
+
+      - name: Preserve Windows startup diagnostics
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-startup-diagnostics
+          path: diagnostics/windows-startup/*
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}

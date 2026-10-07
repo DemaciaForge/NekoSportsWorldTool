@@ -14,7 +14,9 @@ pub const ASCENT_NOISE_THRESHOLD_M: f64 = 0.15;
 
 /// Return the positive ascent contribution for one adjacent pair of points.
 pub fn positive_ascent_delta(delta_m: f64) -> f64 {
-    if delta_m > ASCENT_NOISE_THRESHOLD_M {
+    // Subtracting decimal altitude samples can put an exact 0.15 m change
+    // slightly above the threshold. Ignore only nanometre-scale roundoff.
+    if delta_m - ASCENT_NOISE_THRESHOLD_M > 1e-9 {
         delta_m
     } else {
         0.0
@@ -213,7 +215,15 @@ mod tests {
         assert!(track.altitude_gain_override.is_none());
         let (ascent, descent, net) = track.elevation_stats();
         assert!(ascent >= 0.0 && descent >= 0.0);
-        assert!((ascent - descent - net).abs() < 0.05);
+        assert_eq!(ascent, total_ascent(&track.locations));
+        // The net change still uses endpoint heights; noise-filtered ascent
+        // need not conserve the unfiltered ascent/descent difference.
+        let raw_ascent: f64 = track
+            .locations
+            .windows(2)
+            .map(|pair| (pair[1].bdA - pair[0].bdA).max(0.0))
+            .sum();
+        assert!((raw_ascent - descent - net).abs() < 0.05);
     }
 
     #[test]
@@ -227,5 +237,13 @@ mod tests {
         assert_eq!(total_ascent(&track.locations), 0.16);
         track.locations[1].bdA = 10.15;
         assert_eq!(total_ascent(&track.locations), 0.16);
+    }
+
+    #[test]
+    fn exact_decimal_threshold_is_not_counted_after_subtraction() {
+        for base in [0.0, 10.0, 9000.0] {
+            assert_eq!(positive_ascent_delta((base + 0.15) - base), 0.0);
+        }
+        assert_eq!(positive_ascent_delta(0.150001), 0.150001);
     }
 }

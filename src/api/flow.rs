@@ -11,8 +11,8 @@ use crate::location::Coordinate;
 use crate::track::generate_road::RouteMode;
 use crate::track::generator::build as gen_track;
 use crate::track::wire::{
-    build_obs_object, build_obs_object_with_area_and_track, five_point_wrapper,
-    five_point_wrapper_with_area_and_track, obs_keys, validate_five_point_wrapper,
+    build_obs_object_with_area_and_track, five_point_wrapper_with_area_and_track, obs_keys,
+    validate_five_point_wrapper, RunAreaMeta,
 };
 use rand_distr::{Distribution, Normal};
 use serde_json::{json, Value};
@@ -126,9 +126,20 @@ pub fn run_dry_run(params: &RunParams, anchor: Coordinate) -> Result<DryRunSumma
     }
     track.validate_consistency()?;
 
-    let five = five_point_wrapper(&live_points, track.startTime);
+    // The local fixture needs the same fence metadata as a campus payload.
+    // It is derived only from these synthetic points and is never uploaded.
+    let fence_points: Vec<Value> = live_points
+        .iter()
+        .map(|point| json!({ "lat": point["lat"], "lon": point["lon"] }))
+        .collect();
+    let area = RunAreaMeta {
+        run_area_id: -1,
+        geo_fences_json: json!([{ "points": fence_points }]).to_string(),
+        freedom_show_fence: true,
+    };
+    let five = five_point_wrapper_with_area_and_track(&live_points, track.startTime, &area, &track);
     validate_five_point_wrapper(&five)?;
-    let obj = build_obs_object(&track, 0, "dry-run", 0, &live_points);
+    let obj = build_obs_object_with_area_and_track(&track, 0, "dry-run", 0, &live_points, &area);
     let keys = obs_keys(&track, 0, "dry-run");
     if keys.len() != 2 {
         return Err(format!("dry-run OBS key 数量异常: {}", keys.len()));
@@ -785,18 +796,20 @@ pub fn run_ai_submit(
 }
 
 #[cfg(test)]
-mod tests {
+mod dry_run_tests {
     use super::{run_dry_run, RouteMode, RunParams};
     use crate::location::Coordinate;
 
     fn params() -> RunParams {
         RunParams {
             dist: 2_000.0,
-            dur: 1_200,
+            dur: 800,
             start_ms: 1_700_000_000_000,
             face_check: 1,
             manual_altitude: None,
             manual_altitude_range: None,
+            track_color_mode: crate::api::model::TrackColorMode::FullGreen,
+            track_spec: crate::api::model::TrackSpec::Auto,
             seed: 7,
             route_mode: RouteMode::Legacy,
         }
@@ -805,7 +818,7 @@ mod tests {
     #[test]
     fn dry_run_builds_and_validates_protocol_payloads() {
         let summary = run_dry_run(&params(), Coordinate::new(39.9, 116.4, 0.0).unwrap()).unwrap();
-        assert_eq!(summary.duration_s, 1_200);
+        assert_eq!(summary.duration_s, 800);
         assert_eq!(summary.obs_keys, 2);
         assert!(summary.track_points > 10);
         assert!(summary.distance_m > 1_999.0 && summary.distance_m < 2_001.0);

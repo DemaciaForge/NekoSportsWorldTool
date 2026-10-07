@@ -43,7 +43,6 @@ impl LogStore {
             let (kind, text) = classify(t);
             self.lines.push_back(LogLine {
                 text: redact_text(text),
-
                 kind,
             });
         }
@@ -72,5 +71,38 @@ impl LogStore {
                     );
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_and_multibyte_diagnostics_are_safe_in_gui_log_store() {
+        let mut log = LogStore::default();
+        log.push("公网 IP：1.2.3.4\n公网 IP 获取失败\n\n√ [update] 已是最新版本（v0.3.0）");
+        log.push("未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块");
+        log.push("⚠ 😀 登录失败 password='中文😀' token=secret");
+
+        let lines: Vec<_> = log
+            .lines
+            .iter()
+            .map(|line| (line.text.as_str(), line.kind))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("公网 IP：1.2.3.4", LogKind::Plain),
+                ("公网 IP 获取失败", LogKind::Err),
+                ("[update] 已是最新版本（v0.3.0）", LogKind::Ok),
+                (
+                    "未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块",
+                    LogKind::Plain
+                ),
+                ("😀 登录失败 password='***' token=***", LogKind::Warn),
+            ]
+        );
+        assert_eq!(log.len(), 5);
     }
 }

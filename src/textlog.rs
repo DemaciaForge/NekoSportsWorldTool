@@ -95,7 +95,8 @@ fn redact_pairs(input: &str) -> String {
         let mut matched = None;
         for key in SENSITIVE_KEYS {
             if input[pos..].len() < key.len()
-                || !input[pos..pos + key.len()].eq_ignore_ascii_case(key)
+                // ASCII keys may end inside a UTF-8 character in the input.
+                || !input.as_bytes()[pos..pos + key.len()].eq_ignore_ascii_case(key.as_bytes())
                 || !boundary(
                     pos.checked_sub(1)
                         .and_then(|i| input.as_bytes().get(i).copied()),
@@ -228,5 +229,54 @@ mod tests {
     #[test]
     fn clean_removes_prefix_and_redacts() {
         assert_eq!(clean("√ token=secret"), "token=***");
+    }
+
+    #[test]
+    fn redact_preserves_real_multibyte_startup_messages() {
+        for message in [
+            "公网 IP：1.2.3.4",
+            "公网 IP 获取失败",
+            "[update] 已是最新版本（v0.3.0）",
+            "未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块",
+            "😀 启动完成",
+        ] {
+            assert_eq!(redact_text(message), message);
+        }
+    }
+
+    #[test]
+    fn redact_multibyte_diagnostics_retains_sensitive_key_matching() {
+        for prefix in ["登录成功 ", "😀 ", "中文😀："] {
+            for key in SENSITIVE_KEYS {
+                let message = format!("{prefix}{key}=秘密😀 完成");
+                assert_eq!(redact_text(&message), format!("{prefix}{key}=*** 完成"));
+            }
+        }
+        assert_eq!(
+            redact_text("中文 DeviceId=设备 uid:123 name=正常"),
+            "中文 DeviceId=*** uid:*** name=正常"
+        );
+        assert_eq!(
+            redact_text("中文 mytoken=正常 tokenized=正常"),
+            "中文 mytoken=正常 tokenized=正常"
+        );
+    }
+
+    #[test]
+    fn redact_multibyte_quoted_values_and_truncated_json() {
+        assert_eq!(
+            redact_text(r#"登录失败 password="中\"文😀" token='秘密' 正常"#),
+            r#"登录失败 password="***" token='***' 正常"#
+        );
+        for (message, expected) in [
+            (r#"{"token":"秘密😀"#, r#"{"token":"***"#),
+            (
+                r#"{"token":"秘密😀","message":"中文"#,
+                r#"{"token":"***","message":"中文"#,
+            ),
+            ("😀 password='未闭合中文", "😀 password='***"),
+        ] {
+            assert_eq!(redact_text(message), expected);
+        }
     }
 }

@@ -5,7 +5,7 @@
 #      —— APK 以固定资产名 NekoSportsWorldTool-android-arm64.apk 挂到该 tag 的
 #        Release（与 release.yml 写同一个 Release，桌面端产物由那边附加），
 #        Android 端「关于页」自更新按此资产名精确匹配（src/update.rs asset_name）。
-#   ② 推送 main：仅出 Actions 构建产物（不发布），用于验证 Android 链路可编译。
+#   ② 推送 main / 整合分支：启动验证通过后产出 Actions 构建产物（不发布）。
 #   ③ 手动：Actions 页面 Run workflow。
 #
 # 版本盖章（与 android/release.ps1 同一套编码）：
@@ -34,7 +34,7 @@ name: APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, integrate/pr34-pr35-pr36-issue38]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -54,8 +54,73 @@ env:
   APK_ASSET: NekoSportsWorldTool-android-arm64.apk
 
 jobs:
+  smoke:
+    name: Android 启动与重启验证 (API 36, x86_64 release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-smoke-release
+
+      - name: 安装 Android 构建组件
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "ndk;${NDK_VERSION}" "build-tools;${BUILD_TOOLS}" "platforms;${PLATFORM}" > /dev/null
+
+      - name: 构建独立测试签名 APK
+        env:
+          ABI: x86_64
+          TARGET: x86_64-linux-android
+          PACKAGE_DIR: ${{ runner.temp }}/neko-android-smoke
+          KEYSTORE: ${{ runner.temp }}/neko-android-smoke.keystore
+        run: |
+          keytool -genkeypair -noprompt -keystore "$KEYSTORE" -storepass android -keypass android \
+            -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname 'CN=Neko CI Smoke,O=Testing,C=US'
+          bash android/build-linux.sh
+
+      - name: 启用模拟器 KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: 启动保持 70 秒、Activity 重建及独立进程数据保留
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          PACKAGE_DIR: ${{ runner.temp }}/neko-android-smoke
+          KEYSTORE: ${{ runner.temp }}/neko-android-smoke.keystore
+        with:
+          api-level: 36
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: bash android/test-linux.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Android-startup-diagnostics
+          path: ${{ runner.temp }}/neko-android-smoke/diagnostics/*
+          if-no-files-found: ignore
+
   apk:
     name: APK (arm64-v8a)
+    needs: smoke
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -177,6 +242,7 @@ jobs:
             echo "KS_PASS=${KS_PASS_SECR:-android}" >> "$GITHUB_ENV"
             echo "KS_ALIAS=${KS_ALIAS_SECR:-androiddebugkey}" >> "$GITHUB_ENV"
             echo "KEY_PASS=${KEY_PASS_SECR:-android}" >> "$GITHUB_ENV"
+            echo "USING_RELEASE_KEY=true" >> "$GITHUB_ENV"
             echo "使用仓库 Secret 签名密钥"
           elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
             echo "::error::tag 构建必须配置 Secret ANDROID_KEYSTORE_BASE64（keystore 的 base64）。签名不一致会导致所有已装用户无法覆盖安装；本地历史密钥为 android/.signing/local-test.keystore，请将其 base64 后配置。"
@@ -204,6 +270,24 @@ jobs:
           "$BT/zipalign" -c -P 16 4 "$apk"
           "$BT/aapt2" dump badging "$apk" | grep -E 'package:|sdkVersion:|targetSdkVersion:|native-code:'
           sha256sum "$apk"
+
+      - name: 验证 fork 正式签名与 v0.3.3 保持一致
+        if: github.repository == 'DemaciaForge/NekoSportsWorldTool' && env.USING_RELEASE_KEY == 'true'
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/$BUILD_TOOLS"
+          baseline="$RUNNER_TEMP/neko-v0.3.3-signing-baseline.apk"
+          curl --fail --location --retry 3 \
+            'https://github.com/DemaciaForge/NekoSportsWorldTool/releases/download/v0.3.3/NekoSportsWorldTool-android-arm64.apk' \
+            --output "$baseline"
+          "$BT/apksigner" verify --print-certs "$baseline" > "$RUNNER_TEMP/neko-baseline-cert.txt"
+          "$BT/apksigner" verify --print-certs "dist/$APK_ASSET" > "$RUNNER_TEMP/neko-current-cert.txt"
+          sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: //p' "$RUNNER_TEMP/neko-baseline-cert.txt" | sort > "$RUNNER_TEMP/neko-baseline-digests.txt"
+          sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: //p' "$RUNNER_TEMP/neko-current-cert.txt" | sort > "$RUNNER_TEMP/neko-current-digests.txt"
+          test -s "$RUNNER_TEMP/neko-baseline-digests.txt"
+          test -s "$RUNNER_TEMP/neko-current-digests.txt"
+          diff -u "$RUNNER_TEMP/neko-baseline-digests.txt" "$RUNNER_TEMP/neko-current-digests.txt"
+          echo '正式 APK 签名证书与 v0.3.3 一致'
 
       - uses: actions/upload-artifact@v4
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
