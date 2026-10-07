@@ -8,7 +8,9 @@
 //!
 //! 协议字段/哨兵/断崖/吸附/10s 窗与经典模式完全一致。
 
-use super::generator::{MAX_EXCEPTION_DRIFT_M, SPEED_CEIL, SPEED_FLOOR};
+use super::generator::{
+    MAX_EXCEPTION_DRIFT_M, MAX_EXCEPTION_GPS_SPEED_KMH, SPEED_CEIL, SPEED_FLOOR,
+};
 use super::geom::{
     fmt_gain_time, ring_point_at, round_to, to_bd, wgs84_to_bd09, Rng, MET_PER_DEG_LAT,
     MET_PER_DEG_LNG,
@@ -452,7 +454,7 @@ pub fn build_road(
             ((nxt.0 - x).atan2(nxt.1 - y).to_degrees() + rng.gauss(0.0, 35.0)).rem_euclid(360.0);
         let (avg_sp, gps_speed) = if typ == -1 {
             let avg = round_to(dist_acc / t_acc.max(1.0), 4);
-            let gps = rng.uniform(0.5, SPEED_CEIL * 3.6);
+            let gps = rng.uniform(0.5, MAX_EXCEPTION_GPS_SPEED_KMH);
             (avg, round_to(gps, 4))
         } else {
             let avg = round_to(d_step / dt, 4);

@@ -13,6 +13,7 @@ use super::postfix::apply_post_fixes;
 /// 有效配速窗口（判定规则 2'21"-10'00"/km ≈ 1.667-7.092 m/s），硬边界留余量。
 pub const SPEED_FLOOR: f64 = 1.90;
 pub const SPEED_CEIL: f64 = 6.30;
+pub const MAX_EXCEPTION_GPS_SPEED_KMH: f64 = 6.0;
 /// Maximum coordinate drift for a protocol exception point.
 ///
 /// These points may still carry their original type marker, but they must not
@@ -245,10 +246,10 @@ pub fn build(
         let nxt = pos(s + direction * 2.0);
         let brg = ((nxt.0 - x).atan2(nxt.1 - y).to_degrees() + rng.gauss(0.0, 35.0)).rem_euclid(360.0);
         // 异常点（-1）：avgSpeed 为累计均值（真人与此一致，不为 0）；
-        // GPS 瞬时速度多为低速，偶发 15-46 km/h 漂移尖峰
+        // GPS 瞬时速度保持低速，避免尖峰污染最快配速。
         let (avg_sp, gps_speed) = if typ == -1 {
             let avg = round_to(dist_acc / t_acc.max(1.0), 4);
-            let gps = rng.uniform(0.5, SPEED_CEIL * 3.6);
+            let gps = rng.uniform(0.5, MAX_EXCEPTION_GPS_SPEED_KMH);
             (avg, round_to(gps, 4))
         } else {
             let avg = round_to(d_step / dt, 4);
@@ -382,7 +383,7 @@ pub fn build(
 
 #[cfg(test)]
 mod tests {
-    use super::{build, MAX_EXCEPTION_DRIFT_M, SPEED_CEIL};
+    use super::{build, MAX_EXCEPTION_DRIFT_M, MAX_EXCEPTION_GPS_SPEED_KMH};
     use crate::track::geom::{MET_PER_DEG_LAT, MET_PER_DEG_LNG};
 
     #[test]
@@ -395,12 +396,14 @@ mod tests {
         ];
         for seed in 0..32 {
             let track = build(2_000.0, 800, seed, points[0], 1_700_000_000_000, &points);
+            let mut exception_count = 0;
             for (index, point) in track.locations.iter().enumerate() {
                 if point.ptype != -1 {
                     continue;
                 }
+                exception_count += 1;
                 assert!(point.radius <= 10.0);
-                assert!(point.speed <= SPEED_CEIL * 3.6 + 1e-9);
+                assert!(point.speed <= MAX_EXCEPTION_GPS_SPEED_KMH + 1e-9);
                 if let Some(previous) = index.checked_sub(1).and_then(|i| track.locations.get(i)) {
                     let dx = (point.gLng - previous.gLng) * MET_PER_DEG_LNG;
                     let dy = (point.gLat - previous.gLat) * MET_PER_DEG_LAT;
@@ -411,6 +414,7 @@ mod tests {
                     );
                 }
             }
+            assert!(exception_count > 0, "seed {seed} should exercise exception points");
         }
         assert!(MAX_EXCEPTION_DRIFT_M < 10.0);
     }

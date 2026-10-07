@@ -80,12 +80,14 @@ mod tests {
     }
 
     fn assert_exception_points_are_bounded(track: &super::model::Track) {
+        let mut exception_count = 0;
         for (index, point) in track.locations.iter().enumerate() {
             if point.ptype != -1 {
                 continue;
             }
+            exception_count += 1;
             assert!(point.radius <= 10.0, "exception radius={}", point.radius);
-            assert!(point.speed <= super::generator::SPEED_CEIL * 3.6 + 1e-9);
+            assert!(point.speed <= super::generator::MAX_EXCEPTION_GPS_SPEED_KMH + 1e-9);
             for neighbor in [
                 index.checked_sub(1),
                 (index + 1 < track.locations.len()).then_some(index + 1),
@@ -97,11 +99,12 @@ mod tests {
                 let dx = (point.gLng - other.gLng) * MET_PER_DEG_LNG;
                 let dy = (point.gLat - other.gLat) * MET_PER_DEG_LAT;
                 assert!(
-                    (dx * dx + dy * dy).sqrt() <= 80.0,
+                    (dx * dx + dy * dy).sqrt() <= 45.0,
                     "exception neighbor jump too large"
                 );
             }
         }
+        assert!(exception_count > 0, "test track should exercise exception points");
     }
 
     /// 模式 B（真实道路路由）：距离精确、哨兵/断崖语义与模式 A 一致。
