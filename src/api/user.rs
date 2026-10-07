@@ -68,11 +68,5 @@ pub fn fetch_my_info(client: &mut ApiClient, log: &mut dyn FnMut(&str)) -> MyInf
         _ => Value::Null,
     };
 
-    MyInfo {
-        profile,
-        home_page,
-        personal_semester,
-        summary,
-        completed,
-    }
+    MyInfo { profile, home_page, personal_semester, summary, completed }
 }

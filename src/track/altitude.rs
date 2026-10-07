@@ -46,40 +46,13 @@ pub fn parse_spec(text: &str) -> Result<Option<AltitudeSpec>, String> {
         return Ok(None);
     }
     if let Some((left, right)) = text.split_once('-') {
-        let min_m = left
-            .trim()
-            .parse::<f64>()
-            .map_err(|_| "手动海拔区间格式应为 min-max，例如 11.6-22.8".to_string())?;
-        let max_m = right
-            .trim()
-            .parse::<f64>()
-            .map_err(|_| "手动海拔区间格式应为 min-max，例如 11.6-22.8".to_string())?;
+        let min_m = left.trim().parse::<f64>().map_err(|_| "手动海拔区间格式应为 min-max，例如 11.6-22.8".to_string())?;
+        let max_m = right.trim().parse::<f64>().map_err(|_| "手动海拔区间格式应为 min-max，例如 11.6-22.8".to_string())?;
         return Ok(Some(AltitudeSpec::Range(validate_range(min_m, max_m)?)));
     }
-    let altitude_m = text
-        .parse::<f64>()
-        .map_err(|_| "手动海拔应为数字或 min-max 区间，例如 17.2 或 11.6-22.8".to_string())?;
+    let altitude_m = text.parse::<f64>().map_err(|_| "手动海拔应为数字或 min-max 区间，例如 17.2 或 11.6-22.8".to_string())?;
     validate_altitude(altitude_m)?;
     Ok(Some(AltitudeSpec::Single(altitude_m)))
-}
-
-/// 解析 UI 中分开的最低、最高海拔输入框。连接符由界面绘制。
-pub fn parse_range_fields(min_text: &str, max_text: &str) -> Result<Option<AltitudeRange>, String> {
-    let min_text = min_text.trim();
-    let max_text = max_text.trim();
-    if min_text.is_empty() && max_text.is_empty() {
-        return Ok(None);
-    }
-    if min_text.is_empty() || max_text.is_empty() {
-        return Err("最低海拔和最高海拔需要同时填写，或同时留空".into());
-    }
-    let min_m = min_text
-        .parse::<f64>()
-        .map_err(|_| "最低海拔必须是数字".to_string())?;
-    let max_m = max_text
-        .parse::<f64>()
-        .map_err(|_| "最高海拔必须是数字".to_string())?;
-    validate_range(min_m, max_m).map(Some)
 }
 
 fn validate_altitude(altitude_m: f64) -> Result<(), String> {
@@ -108,7 +81,6 @@ pub fn override_bd_a(track: &mut Track, altitude_m: f64) -> Result<(), String> {
         point.bdA = round_to(altitude_m, 2);
         point.hasAltitude = true;
     }
-    track.altitude_gain_override = Some(0.0);
     Ok(())
 }
 
@@ -131,9 +103,6 @@ pub fn override_bd_a_range(track: &mut Track, range: AltitudeRange) -> Result<()
         point.bdA = round_to(mapped.clamp(range.min_m, range.max_m), 2);
         point.hasAltitude = true;
     }
-    // The range only constrains absolute samples. Cumulative ascent is the
-    // sum of positive deltas after mapping, not max altitude minus min altitude.
-    track.altitude_gain_override = None;
     Ok(())
 }
 
@@ -164,53 +133,16 @@ mod tests {
 
     #[test]
     fn parses_single_value_and_range() {
-        assert_eq!(
-            parse_spec("17.2").unwrap(),
-            Some(AltitudeSpec::Single(17.2))
-        );
-        assert_eq!(
-            parse_spec("11.6-22.8").unwrap(),
-            Some(AltitudeSpec::Range(AltitudeRange {
-                min_m: 11.6,
-                max_m: 22.8
-            }))
-        );
+        assert_eq!(parse_spec("17.2").unwrap(), Some(AltitudeSpec::Single(17.2)));
+        assert_eq!(parse_spec("11.6-22.8").unwrap(), Some(AltitudeSpec::Range(AltitudeRange { min_m: 11.6, max_m: 22.8 })));
         assert!(parse_spec("22.8-11.6").is_err());
-    }
-
-    #[test]
-    fn parses_separate_range_fields_without_typed_separator() {
-        assert_eq!(
-            parse_range_fields("1", "13").unwrap(),
-            Some(AltitudeRange {
-                min_m: 1.0,
-                max_m: 13.0
-            })
-        );
-        assert!(parse_range_fields("1", "").is_err());
-        assert!(parse_range_fields("13", "1").is_err());
-        assert_eq!(parse_range_fields(" ", " ").unwrap(), None);
     }
 
     #[test]
     fn range_mapping_stays_inside_requested_bounds() {
         let mut track = build(1200.0, 600, 7, (38.9, 121.54), 1_700_000_000_000, &points());
-        override_bd_a_range(
-            &mut track,
-            AltitudeRange {
-                min_m: 11.6,
-                max_m: 22.8,
-            },
-        )
-        .unwrap();
-        assert!(track
-            .locations
-            .iter()
-            .all(|p| (11.6..=22.8).contains(&p.bdA)));
-        assert!(track.altitude_gain_override.is_none());
-        let (ascent, descent, net) = track.elevation_stats();
-        assert!(ascent >= 0.0 && descent >= 0.0);
-        assert!((ascent - descent - net).abs() < 0.05);
+        override_bd_a_range(&mut track, AltitudeRange { min_m: 11.6, max_m: 22.8 }).unwrap();
+        assert!(track.locations.iter().all(|p| (11.6..=22.8).contains(&p.bdA)));
     }
 
     #[test]
