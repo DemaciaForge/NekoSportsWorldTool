@@ -9,7 +9,7 @@
 use crate::api::client::{make_agent, ureq_err};
 
 pub const REPO_UPSTREAM: &str = "YanamiNeko/NekoSportsWorldTool";
-pub const REPO_FORK: &str = "hb-degithub/NekoSportsWorldTool";
+pub const REPO_FORK: &str = "DemaciaForge/NekoSportsWorldTool";
 
 const UA: &str = concat!("NekoSportsWorldTool/", env!("CARGO_PKG_VERSION"));
 
