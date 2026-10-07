@@ -151,6 +151,32 @@ mod validation_tests {
         assert!(laps.iter().all(|lap| lap["endAltAbs"] == 36.75));
         assert!(laps.iter().all(|lap| lap["endAltRel"] == 0.0));
     }
+
+    #[test]
+    fn lap_metrics_use_seconds_per_kilometre_and_stride_metres() {
+        let points = vec![(38.901678, 121.540241), (38.902564, 121.541233)];
+        let mut track = crate::track::generator::build(
+            1200.0,
+            600,
+            7,
+            (38.9, 121.54),
+            1_700_000_000_000,
+            &points,
+        );
+        let mut start = track.locations[0].clone();
+        start.totalTime = 0;
+        start.totalDis = 0.0;
+        start.steps = 0;
+        let mut finish = start.clone();
+        finish.totalTime = 600;
+        finish.totalDis = 1000.0;
+        finish.steps = 1200;
+        track.locations = vec![start, finish];
+
+        let lap = build_laps(&track, track.startTime).remove(0);
+        assert_eq!(lap["avgPace"].as_f64(), Some(600.0));
+        assert_eq!(lap["avgStride"].as_f64(), Some(0.83));
+    }
 }
 
 /// 10s 时间窗，id=(rrid%100000)*1000+窗口序秒（6 个真人样本跨 9 月记录验证一致；
@@ -191,7 +217,7 @@ fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>) {
     (sp, stf)
 }
 
-/// 圈（每 1000m 一圈，末圈 isFullLap=false；avgStride 单位厘米）。
+/// 圈（每 1000m 一圈，末圈 isFullLap=false；avgStride 单位米）。
 fn build_laps(track: &Track, start_ms: i64) -> Vec<Value> {
     let mut laps = Vec::new();
     let locs = &track.locations;
@@ -201,7 +227,7 @@ fn build_laps(track: &Track, start_ms: i64) -> Vec<Value> {
         if i > 0 {
             let dd = pt.bdA - locs[i - 1].bdA;
             if dd > 0.0 {
-                gain += dd;
+                gain += super::altitude::positive_ascent_delta(dd);
             }
         }
         let d_now = pt.totalDis;
@@ -213,8 +239,8 @@ fn build_laps(track: &Track, start_ms: i64) -> Vec<Value> {
             let lap_steps = pt.steps - prev_steps;
             laps.push(json!({
                 "avgCadence": round_to(lap_steps as f64 / (lap_t as f64 / 60.0), 2),
-                "avgPace": round_to((lap_t as f64 / 60.0) / (lap_d / 1000.0).max(0.001), 2),
-                "avgStride": round_to(lap_d / 1.max(lap_steps) as f64 * 100.0, 2),
+                "avgPace": round_to(lap_t as f64 / (lap_d / 1000.0).max(0.001), 2),
+                "avgStride": round_to(lap_d / 1.max(lap_steps) as f64, 2),
                 "cumulativeDuration": t_now,
                 "distance": round_to(lap_d, 4),
                 "duration": lap_t,

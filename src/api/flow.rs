@@ -517,7 +517,7 @@ mod tests {
     fn params() -> RunParams {
         RunParams {
             dist: 2_000.0,
-            dur: 1_200,
+            dur: 800,
             start_ms: 1_700_000_000_000,
             face_check: 1,
             manual_altitude: None,
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn dry_run_builds_and_validates_protocol_payloads() {
         let summary = run_dry_run(&params(), Coordinate::new(39.9, 116.4, 0.0).unwrap()).unwrap();
-        assert_eq!(summary.duration_s, 1_200);
+        assert_eq!(summary.duration_s, 800);
         assert_eq!(summary.obs_keys, 2);
         assert!(summary.track_points > 10);
         assert!(summary.distance_m > 1_999.0 && summary.distance_m < 2_001.0);

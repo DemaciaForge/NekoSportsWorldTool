@@ -337,7 +337,7 @@ pub fn build(
                 totalTime: round_to(seg_t, 0) as i64,
                 distance: round_to(seg_d, 0) as i64,
                 startTime: round_to((times[i] - seg_t) * 1000.0, 0) as i64,
-                endTime: round_to(times[i] * 1000.0, 0) as i64,
+                endTime: round_to((times[i] + dts[i]) * 1000.0, 0) as i64,
                 avgSpeed: round_to(seg_v.iter().sum::<f64>() / seg_v.len() as f64, 3),
                 avgStep: round_to(steps_acc / 1.0f64.max(t_acc) * 60.0, 0) as i64,
                 state: 0,

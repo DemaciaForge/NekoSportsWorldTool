@@ -94,8 +94,10 @@ fn redact_pairs(input: &str) -> String {
     while pos < input.len() {
         let mut matched = None;
         for key in SENSITIVE_KEYS {
-            if input[pos..].len() < key.len()
-                || !input[pos..pos + key.len()].eq_ignore_ascii_case(key)
+            let Some(candidate) = input.get(pos..pos + key.len()) else {
+                continue;
+            };
+            if !candidate.eq_ignore_ascii_case(key)
                 || !boundary(
                     pos.checked_sub(1)
                         .and_then(|i| input.as_bytes().get(i).copied()),

@@ -413,22 +413,16 @@ fn cmd_records_raw(rest: &[&str]) -> i32 {
             } else if n > 0 {
                 println!(
                     "首条: {}",
-                    crate::textlog::redact_text(
-                        &arr[0].to_string()[..arr[0].to_string().len().min(300)],
-                    )
+                    crate::textlog::redact_text(&crate::textlog::truncate(&arr[0].to_string(), 300))
                 );
                 println!(
                     "末条: {}",
-                    crate::textlog::redact_text(
-                        &arr[n - 1].to_string()[..arr[n - 1].to_string().len().min(300)],
-                    )
+                    crate::textlog::redact_text(&crate::textlog::truncate(&arr[n - 1].to_string(), 300))
                 );
             } else {
                 println!(
                     "data: {}",
-                    crate::textlog::redact_text(
-                        &data.to_string()[..data.to_string().len().min(500)],
-                    )
+                    crate::textlog::redact_text(&crate::textlog::truncate(&data.to_string(), 500))
                 );
             }
             0
