@@ -153,7 +153,7 @@ mod validation_tests {
     }
 
     #[test]
-    fn lap_metrics_use_seconds_per_kilometre_and_stride_metres() {
+    fn lap_metrics_use_minutes_per_kilometre_and_stride_centimetres() {
         let points = vec![(38.901678, 121.540241), (38.902564, 121.541233)];
         let mut track = crate::track::generator::build(
             1200.0,
@@ -174,8 +174,8 @@ mod validation_tests {
         track.locations = vec![start, finish];
 
         let lap = build_laps(&track, track.startTime).remove(0);
-        assert_eq!(lap["avgPace"].as_f64(), Some(600.0));
-        assert_eq!(lap["avgStride"].as_f64(), Some(0.83));
+        assert_eq!(lap["avgPace"].as_f64(), Some(10.0));
+        assert_eq!(lap["avgStride"].as_f64(), Some(83.33));
     }
 }
 
@@ -217,7 +217,7 @@ fn build_windows(track: &Track, rrid: i64) -> (Vec<Value>, Vec<Value>) {
     (sp, stf)
 }
 
-/// 圈（每 1000m 一圈，末圈 isFullLap=false；avgStride 单位米）。
+/// 圈（每 1000m 一圈，末圈 isFullLap=false；avgStride 单位厘米）。
 fn build_laps(track: &Track, start_ms: i64) -> Vec<Value> {
     let mut laps = Vec::new();
     let locs = &track.locations;
@@ -239,8 +239,8 @@ fn build_laps(track: &Track, start_ms: i64) -> Vec<Value> {
             let lap_steps = pt.steps - prev_steps;
             laps.push(json!({
                 "avgCadence": round_to(lap_steps as f64 / (lap_t as f64 / 60.0), 2),
-                "avgPace": round_to(lap_t as f64 / (lap_d / 1000.0).max(0.001), 2),
-                "avgStride": round_to(lap_d / 1.max(lap_steps) as f64, 2),
+                "avgPace": round_to((lap_t as f64 / 60.0) / (lap_d / 1000.0).max(0.001), 2),
+                "avgStride": round_to(lap_d / 1.max(lap_steps) as f64 * 100.0, 2),
                 "cumulativeDuration": t_now,
                 "distance": round_to(lap_d, 4),
                 "duration": lap_t,
