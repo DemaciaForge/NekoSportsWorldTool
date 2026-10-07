@@ -539,6 +539,7 @@ mod tests {
             manual_altitude_range: None,
             seed: 7,
             route_mode: RouteMode::Legacy,
+            track_spec: crate::track::stadium::TrackSpec::Auto,
         }
     }
 
