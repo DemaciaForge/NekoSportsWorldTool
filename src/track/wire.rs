@@ -192,12 +192,30 @@ mod validation_tests {
     }
 
     #[test]
+    fn five_point_validation_allows_null_fence_metadata() {
+        let mut wrapper = five_point_wrapper_without_fence_fields();
+        wrapper["runAreaId"] = Value::Null;
+        wrapper["geoFencesJson"] = Value::Null;
+        wrapper["freedomShowFence"] = Value::Null;
+        assert!(validate_five_point_wrapper(&wrapper.to_string()).is_ok());
+    }
+
+    #[test]
     fn five_point_validation_accepts_valid_fence_metadata() {
         let mut wrapper = five_point_wrapper_without_fence_fields();
         wrapper["runAreaId"] = json!(-1);
         wrapper["geoFencesJson"] = json!(r#"[{"id":1}]"#);
         wrapper["freedomShowFence"] = json!(true);
         assert!(validate_five_point_wrapper(&wrapper.to_string()).is_ok());
+    }
+
+    #[test]
+    fn five_point_validation_rejects_hidden_non_empty_fence() {
+        let mut wrapper = five_point_wrapper_without_fence_fields();
+        wrapper["runAreaId"] = json!(-1);
+        wrapper["geoFencesJson"] = json!(r#"[{"id":1}]"#);
+        wrapper["freedomShowFence"] = json!(false);
+        assert!(validate_five_point_wrapper(&wrapper.to_string()).is_err());
     }
 
     #[test]
