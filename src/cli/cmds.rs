@@ -171,6 +171,7 @@ fn cmd_run(rest: &[&str]) -> i32 {
         manual_altitude_range,
         seed,
         route_mode,
+        track_spec: cfg.track_spec,
     };
 
     if dry_run {
