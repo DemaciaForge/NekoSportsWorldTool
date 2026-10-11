@@ -381,7 +381,7 @@ pub fn build_with_color_mode(
     }
     let _ = seg_n;
 
-    apply_post_fixes(&mut locs, &mut rng, start_ms);
+    apply_post_fixes(&mut locs, &mut rng, start_ms, true);
 
     if color_mode == TrackColorMode::FullGreen {
         // 详情页会根据这些字段给轨迹分段着色。统一普通点协议，保留
