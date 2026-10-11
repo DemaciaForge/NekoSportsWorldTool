@@ -79,6 +79,18 @@ fn redact_json(value: Value) -> Value {
             Value::Object(object)
         }
         Value::Array(values) => Value::Array(values.into_iter().map(redact_json).collect()),
+        Value::String(text) => {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
+                match parsed {
+                    Value::String(inner) => Value::String(redact_pairs(&inner)),
+                    other => serde_json::to_string(&redact_json(other))
+                        .map(Value::String)
+                        .unwrap_or_else(|_| Value::String("***".into())),
+                }
+            } else {
+                Value::String(redact_pairs(&text))
+            }
+        }
         other => other,
     }
 }
@@ -120,11 +132,11 @@ fn redact_pairs(input: &str) -> String {
             while value_start < input.len() && input.as_bytes()[value_start].is_ascii_whitespace() {
                 value_start += 1;
             }
-            matched = Some(value_start);
+            matched = Some((value_start, normalized_key(key) == "authorization"));
             break;
         }
 
-        let Some(value_start) = matched else {
+        let Some((value_start, is_authorization)) = matched else {
             let ch = input[pos..].chars().next().expect("valid UTF-8");
             out.push(ch);
             pos += ch.len_utf8();
@@ -159,8 +171,9 @@ fn redact_pairs(input: &str) -> String {
             while end < input.len()
                 && !matches!(
                     input.as_bytes()[end],
-                    b',' | b';' | b'&' | b' ' | b'\t' | b'\r' | b'\n' | b'}' | b']'
+                    b',' | b';' | b'&' | b'\t' | b'\r' | b'\n' | b'}' | b']'
                 )
+                && (is_authorization || input.as_bytes()[end] != b' ')
             {
                 end += 1;
             }
@@ -225,6 +238,17 @@ mod tests {
 
         let truncated_json = redact_text(r#"{"token":"secret""#);
         assert!(!truncated_json.contains("secret"));
+    }
+
+    #[test]
+    fn redact_nested_json_strings_and_authorization_values() {
+        let nested = redact_text(r#"{"data":"{\"token\":\"nested-secret\",\"uid\":123}"}"#);
+        assert!(!nested.contains("nested-secret"));
+        assert!(!nested.contains("123"));
+
+        let authorization = redact_text("authorization=Bearer SYNTHETIC_TOKEN WITH_SPACES; status=ok");
+        assert!(!authorization.contains("SYNTHETIC_TOKEN"));
+        assert!(authorization.contains("status=ok"));
     }
 
     #[test]

@@ -155,7 +155,7 @@ pub fn login(
     if uid < 1 || token.is_empty() {
         return Err(format!(
             "登录响应缺 uid/token: {}",
-            truncate(&biz.to_string(), 200)
+            crate::textlog::redact_text(&truncate(&biz.to_string(), 200))
         ));
     }
     let sess = Session {
