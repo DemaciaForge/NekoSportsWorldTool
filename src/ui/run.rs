@@ -552,6 +552,13 @@ impl App {
         if self.run_page.route_mode != RouteMode::Road {
             return;
         }
+        if self.run_page.track_spec != crate::track::stadium::TrackSpec::Auto {
+            ui.colored_label(
+                theme::warn(),
+                "已选择标准操场模式，提交将使用标准跑道；道路预览已隐藏",
+            );
+            return;
+        }
         let Some(net) = self.network.clone() else {
             ui.colored_label(
                 theme::warn(),
