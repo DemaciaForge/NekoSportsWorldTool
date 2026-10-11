@@ -8,26 +8,20 @@ const REPOSITORY_URL: &str = "https://github.com/YanamiNeko/NekoSportsWorldTool"
 const CONTRIBUTORS_URL: &str =
     "https://github.com/YanamiNeko/NekoSportsWorldTool/graphs/contributors";
 
-/// 在状态栏上方绘制水印，底边跟随状态栏实际位置，避免遮挡页面控件。
-pub fn draw(ctx: &egui::Context, status_bar_rect: egui::Rect) {
-    let screen_rect = ctx.screen_rect();
-    let status_bar_offset = -(screen_rect.bottom() - status_bar_rect.top());
-    egui::Area::new(egui::Id::new("anti_resale_watermark"))
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, status_bar_offset])
-        .interactable(false)
-        .show(ctx, |ui| {
-            egui::Frame::none()
-                .fill(egui::Color32::from_rgba_unmultiplied(235, 241, 238, 218))
-                .stroke(egui::Stroke::new(
-                    1.0_f32,
-                    egui::Color32::from_rgba_unmultiplied(13, 148, 136, 110),
-                ))
-                .rounding(egui::Rounding::same(6.0))
-                .inner_margin(egui::Margin::same(7.0))
-                .show(ui, |ui| {
-                    ui.set_max_width(320.0);
-                    ui.label(
+/// 在专用底部面板中绘制水印。面板由 egui 正常参与布局，
+/// 因此不会覆盖中央页面的按钮或地图控件。
+pub fn draw(ui: &mut egui::Ui) {
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgba_unmultiplied(235, 241, 238, 218))
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_rgba_unmultiplied(13, 148, 136, 110),
+        ))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::same(7.0))
+        .show(ui, |ui| {
+            ui.set_max_width(320.0);
+            ui.label(
                         egui::RichText::new("本项目免费提供，禁止违反许可证规定进行商业使用。")
                             .small()
                             .strong()
@@ -56,6 +50,5 @@ pub fn draw(ctx: &egui::Context, status_bar_rect: egui::Rect) {
                             CONTRIBUTORS_URL,
                         );
                     });
-                });
         });
 }
