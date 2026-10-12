@@ -136,6 +136,10 @@ mod tests {
             track.locations.iter().any(|p| p.avgSpeed > 0.0 && p.avgSpeed < floor),
             "应存在低于窗口下限的慢速点"
         );
+        assert!(
+            track.locations.iter().any(|p| p.ptype == -1 && p.locType == 4),
+            "慢速段应保留灰色无效点标记"
+        );
         // 有效里程/时间的累计单调不减
         let mut prev = 0.0;
         for p in &track.locations {

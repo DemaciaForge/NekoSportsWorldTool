@@ -300,7 +300,7 @@ pub fn build_road_with_color_mode(
     let fs = rng.uniform(0.15, 0.55);
     let head_t = invalid_time * fs;
     let tail_t = invalid_time - head_t;
-    let mut head_end = 2usize;
+    let head_end;
     let mut tail_start = n;
     {
         let mut cum = 0.0;
@@ -729,16 +729,21 @@ pub fn build_road_with_color_mode(
 
     apply_post_fixes(&mut locs, &mut rng, start_ms, false);
 
-    if color_mode == TrackColorMode::FullGreen {
-        let last_index = locs.len().saturating_sub(1);
-        for (i, point) in locs.iter_mut().enumerate() {
-            point.ptype = if i == 1 {
-                5
-            } else if i == last_index {
-                6
-            } else {
-                0
-            };
+    let last_index = locs.len().saturating_sub(1);
+    for (i, point) in locs.iter_mut().enumerate() {
+        // The cumulative valid distance cannot identify a segment after the
+        // first invalid block, so use the same per-sample mask that drove the
+        // speed profile. Keep the start/end sentinels intact.
+        let invalid_segment = i > 1
+            && i < last_index
+            && invalid.get(i).copied().unwrap_or(false);
+        if invalid_segment {
+            point.ptype = -1;
+            point.locType = 4;
+            point.state = 2;
+            point.bdG = -1;
+        } else if color_mode == TrackColorMode::FullGreen {
+            point.ptype = if i == 1 { 5 } else if i == last_index { 6 } else { 0 };
             point.locType = 1;
             point.state = 1;
             point.bdG = 1;

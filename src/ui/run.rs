@@ -425,14 +425,14 @@ impl App {
                 ui.radio_value(
                     &mut page.track_color_mode,
                     crate::api::model::TrackColorMode::FullGreen,
-                    "全绿色",
+                    "全绿色（有效段）",
                 );
                 ui.radio_value(
                     &mut page.track_color_mode,
                     crate::api::model::TrackColorMode::HalfGreenGray,
                     "灰绿混合",
                 );
-                ui.label("（全绿色可避免详情页出现灰色分段）");
+                ui.label("（road 慢速无效段仍保留灰色）");
             });
         }
 

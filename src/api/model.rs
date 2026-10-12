@@ -12,8 +12,8 @@ pub const DISCOVERY: &str = "https://discovery.gxapp.iydsj.com";
 
 /// 详情页路线颜色模式。
 ///
-/// 全绿色模式只生成官方详情页会识别为绿色的普通轨迹点；绿灰混合模式
-/// 保留原有的点类型和状态分布，便于需要兼容旧行为的用户使用。
+/// 全绿色模式将有效轨迹点统一为详情页可识别的绿色；road 模式的政策慢速段
+/// 仍保留无效灰色标记。绿灰混合模式保留原有的点类型和状态分布。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackColorMode {
