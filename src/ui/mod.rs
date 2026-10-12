@@ -213,10 +213,6 @@ impl eframe::App for App {
         });
 
         // ── 底部状态栏 ──────────────────────────────────────────
-        egui::TopBottomPanel::bottom("watermark_bar")
-            .resizable(false)
-            .show(ctx, |ui| watermark::draw(ui));
-
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
@@ -267,6 +263,8 @@ impl eframe::App for App {
             });
             ui.add_space(2.0);
         });
+
+        watermark::show(ctx);
 
         // ── 标签页 ──────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
