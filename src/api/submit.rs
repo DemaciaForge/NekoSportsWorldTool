@@ -16,6 +16,14 @@ use serde_json::{json, Map, Value};
 
 pub const RECORD_PATH: &str = "/api/v70260/runnings/save/record";
 
+pub const GENERATED_UPLOAD_BLOCKED: &str =
+    "当前跑步功能仅生成合成轨迹，已禁止上传；真实成绩请使用学校认可的官方采集与提交流程";
+
+/// 当前没有真实采集记录入口，任何调用方都不能将生成记录上传。
+pub fn ensure_run_upload_allowed() -> Result<(), String> {
+    Err(GENERATED_UPLOAD_BLOCKED.into())
+}
+
 /// Android 10s 窗（id 种子 60000）。
 fn android_tensec(track: &Track, start_ms: i64, kind: &str) -> Vec<Value> {
     let locs = &track.locations;
@@ -110,6 +118,7 @@ pub fn submit_record(
     p: &SubmitParams,
     log: &mut dyn FnMut(&str),
 ) -> Result<SubmitResult, String> {
+    ensure_run_upload_allowed()?;
     let track = &p.track;
     let start_coordinate = track.validate_consistency()?;
     if p.five_point_json.is_empty() {
@@ -287,6 +296,18 @@ mod metric_tests {
     #[test]
     fn pace_uses_thousandths_of_minute_per_kilometre() {
         assert_eq!(pace_speed_value(2295, 5030.0), 7604);
+    }
+}
+
+#[cfg(test)]
+mod safety_gate_tests {
+    use super::*;
+
+    #[test]
+    fn generated_upload_is_blocked_fail_closed() {
+        let error = ensure_run_upload_allowed().unwrap_err();
+        assert_eq!(error, GENERATED_UPLOAD_BLOCKED);
+        assert!(error.contains("已禁止上传"));
     }
 }
 

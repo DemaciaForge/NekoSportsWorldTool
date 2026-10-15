@@ -123,6 +123,9 @@ pub struct Config {
     /// 自定义路线圈数（0 = 按目标距离自动）。
     #[serde(default)]
     pub custom_laps: i64,
+    /// 风控自检策略（深夜拦截、每日跑步/AI 上限、批量补签上限）。
+    #[serde(default)]
+    pub safety: crate::safety::SafetyPolicy,
 }
 
 fn default_custom_loop() -> bool {
@@ -182,6 +185,7 @@ impl Default for Config {
             custom_destination: String::new(),
             custom_loop: default_custom_loop(),
             custom_laps: 0,
+            safety: crate::safety::SafetyPolicy::default(),
         }
     }
 }
@@ -203,6 +207,16 @@ fn write_json<T: serde::Serialize>(name: &str, value: &T) -> Result<(), String> 
     let json =
         serde_json::to_string_pretty(value).map_err(|e| format!("序列化 {name} 失败: {e}"))?;
     std::fs::write(&path, json).map_err(|e| format!("写入 {} 失败: {e}", path.display()))
+}
+
+/// 通用持久化读取（safety_state.json 等小 JSON 文件）。
+pub fn load_persisted<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
+    read_json(name)
+}
+
+/// 通用持久化写入。
+pub fn save_persisted<T: serde::Serialize>(name: &str, value: &T) -> Result<(), String> {
+    write_json(name, value)
 }
 
 /// 加载设备身份；device_id / app_install_time 缺失时生成一次并立即落盘，
