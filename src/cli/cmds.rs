@@ -25,6 +25,7 @@ pub fn dispatch(args: Vec<String>) -> i32 {
         "ai-info" => cmd_ai_info(&rest),
         "semester" => cmd_semester(),
         "cheat" => cmd_cheat(&rest),
+        "safety" => cmd_safety(&rest),
         "rank" => cmd_rank(&rest),
         "update" => cmd_update(&rest),
         "help" | "--help" | "-h" => {
@@ -83,7 +84,10 @@ fn cmd_logout() -> i32 {
 
 fn cmd_run(rest: &[&str]) -> i32 {
     let flags = parse_flags(rest);
-    let dry_run = get(&flags, "dry-run").is_some();
+    if let Err(error) = check_run_mode(&flags) {
+        eprintln!("{error}");
+        return 1;
+    }
     let dist_km: f32 = get(&flags, "dist")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.0);
@@ -118,9 +122,6 @@ fn cmd_run(rest: &[&str]) -> i32 {
         seed
     };
     let cfg = model::load_config();
-    let identity = model::load_identity();
-    let sess = model::load_session();
-    let mut client = ApiClient::new(identity, sess.is_logged_in().then_some(sess));
     let track_color_mode = match get(&flags, "track-color") {
         None => cfg.track_color_mode,
         Some("mixed") | Some("gray") | Some("grey") | Some("half-green-gray") => {
@@ -203,7 +204,6 @@ fn cmd_run(rest: &[&str]) -> i32 {
         fmt_hms(start_ms)
     );
 
-    let mut log = logger();
     let params = crate::api::flow::RunParams {
         dist,
         dur,
@@ -219,22 +219,114 @@ fn cmd_run(rest: &[&str]) -> i32 {
         custom: custom_spec,
         amap_key,
     };
-    match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
-        Ok(out) => {
-            println!(
-                "跑步提交成功 rrid={} uuid={} obs={}/2 verify={}",
-                out.result.rrid,
-                out.result.uuid,
-                out.obs_ok,
-                if out.detail_ok { "通过" } else { "未通过" }
-            );
-            0
+
+    if get(&flags, "dry-run").is_some() {
+        // 本地深校验：构造完整轨迹/五点/OBS 并校验，不登录、不联网、不上传。
+        let anchor = dry_run_anchor(&flags);
+        match crate::api::flow::run_dry_run(&params, anchor) {
+            Ok(summary) => {
+                println!("本地 dry-run：不登录、不联网、不上传");
+                println!(
+                    "dry-run 通过：{:.0}m / {}s / {} 个轨迹点 / {} 个 OBS key / 起点 {}",
+                    summary.distance_m,
+                    summary.duration_s,
+                    summary.track_points,
+                    summary.obs_keys,
+                    summary.start_latitude
+                );
+                0
+            }
+            Err(error) => {
+                eprintln!("dry-run 校验失败: {error}");
+                1
+            }
         }
-        Err(e) => {
-            eprintln!("跑步提交失败: {e}");
-            1
+    } else if get(&flags, "upload").is_some() {
+        // 上传意图：先过闸门。当前只生成合成轨迹，一律拒绝（fail-closed）。
+        match crate::api::submit::ensure_run_upload_allowed() {
+            Ok(_) => {
+                eprintln!("上传通道尚未开放");
+                1
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        }
+    } else {
+        // 默认：本地参数预览，不登录、不联网、不上传。
+        match crate::api::flow::preview_run_params(&params) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+                0
+            }
+            Err(error) => {
+                eprintln!("参数预览失败: {error}");
+                1
+            }
         }
     }
+}
+
+/// 上传意图校验：--upload 必须配合 --confirm-upload UPLOAD；生成轨迹仍被闸门拒绝。
+fn check_run_mode(flags: &[(String, String)]) -> Result<(), String> {
+    let upload = get(flags, "upload").is_some();
+    let dry_run = get(flags, "dry-run").is_some();
+    let confirmation = get(flags, "confirm-upload");
+    if upload && dry_run {
+        return Err("--upload 与 --dry-run 不能同时使用".into());
+    }
+    if confirmation.is_some() && !upload {
+        return Err("--confirm-upload 必须与 --upload 一起使用".into());
+    }
+    if upload {
+        if confirmation != Some("UPLOAD") {
+            return Err("上传意图需 --confirm-upload UPLOAD 明确确认；确认不能证明数据真实或学校允许".into());
+        }
+        return crate::api::submit::ensure_run_upload_allowed();
+    }
+    Ok(())
+}
+
+/// dry-run 锚点：优先 --lat/--lon，其次设备已保存锚点，最后默认锚点。
+fn dry_run_anchor(flags: &[(String, String)]) -> crate::location::Coordinate {
+    let from_flags = match (
+        get(flags, "lat").and_then(|v| v.parse().ok()),
+        get(flags, "lon").and_then(|v| v.parse().ok()),
+    ) {
+        (Some(lat), Some(lon)) => crate::location::Coordinate::new(lat, lon, 0.0).ok(),
+        _ => None,
+    };
+    if let Some(coord) = from_flags {
+        return coord;
+    }
+    let identity = model::load_identity();
+    if let Ok(coord) = identity.anchor_coordinate() {
+        return coord;
+    }
+    crate::location::default_anchor()
+}
+
+/// 风控自检：显示今日计数与策略；--reset 清零今日计数。
+fn cmd_safety(rest: &[&str]) -> i32 {
+    let flags = parse_flags(rest);
+    let policy = model::load_config().safety;
+    if get(&flags, "reset").is_some() {
+        let mut state = crate::safety::load_state();
+        state.run_count = 0;
+        state.ai_count = 0;
+        state.backfill_count = 0;
+        crate::safety::save_state(&state);
+        println!("今日风控计数已清零");
+        return 0;
+    }
+    let state = crate::safety::load_state();
+    for line in crate::safety::report(&policy, &state) {
+        println!("{line}");
+    }
+    0
 }
 
 /// 自定义路线预览：只调高德接口，不登录、不访问学校服务器、不提交。

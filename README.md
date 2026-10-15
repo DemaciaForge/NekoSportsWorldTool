@@ -12,8 +12,9 @@
 
 ## 功能
 
-- **跑步**：一键全链（策略 → 打卡点 → 轨迹 → 提交 → OBS → 验证），轨迹按打卡点自然生成，开始时间支持随机或指定到前 3 天；路线颜色可选全绿色或灰绿混合
-- **AI 运动**：任务 / 自由练习双模式，批量补签（前 60 天 × 多项目）
+- **跑步**：默认本地参数预览（不登录、不联网、不上传）；`--dry-run` 本地生成并校验完整轨迹/五点/OBS；上传已被 fail-closed 闸门禁止（当前仅生成合成轨迹，无法证明真实）；开始时间支持随机或指定到前 3 天；路线颜色可选全绿色或灰绿混合
+- **AI 运动**：任务 / 自由练习双模式，批量补签（受风控自检上限约束）
+- **风控自检**：内置深夜拦截、每日跑步/AI 次数上限、批量补签上限与跑步上传闸门，默认 fail-closed（见下文）
 - **数据**：学期完成度、违规自查、排行榜（个人/班级/院系 × 日/月、室内榜、历史榜）、个人主页
 - **登录**：支持人机验证自动通过
 - **自动更新**：桌面端检查/下载/自替换并重启（GitHub Release 直连，无镜像）；Android 下载 APK 调起系统安装器；启动检查模式可选（静默/询问/关闭）
@@ -36,11 +37,12 @@
 
 ```text
 NekoSportsWorldTool login --user <手机号> --pass <密码> --remember
-NekoSportsWorldTool run                                  # 一键跑步（--altitude 17.2 固定海拔，或 11.6-22.8 映射到区间）
+NekoSportsWorldTool run                                  # 默认本地参数预览（不登录、不联网、不上传）
 NekoSportsWorldTool run --dry-run --dist 2 --pace 360 --lat 39.9 --lon 116.4
                                                          # 本地生成并校验轨迹/五点/OBS，不登录、不联网、不上传
 NekoSportsWorldTool run --track-color full-green         # 全绿色（默认）；也可选 half-green-gray
-NekoSportsWorldTool ai --sport 2 --score 26000           # AI 运动
+NekoSportsWorldTool safety                               # 风控自检状态（今日计数与每日上限）
+NekoSportsWorldTool ai --sport 2 --score 26000           # AI 运动（受每日上限 / 深夜拦截约束）
 NekoSportsWorldTool rank main --type 1 --sort 1          # 排行榜
 NekoSportsWorldTool update [--check]           # 自动更新（--check 仅检查不下载）
 NekoSportsWorldTool template --file run.gpx   # 本地分析真实记录海拔（不会上传）
@@ -55,11 +57,28 @@ NekoSportsWorldTool help                                 # 全部命令
 
 手动海拔支持三种状态：留空使用自动海拔；填写单个数字（例如 `17.2`）让所有轨迹点使用固定海拔；填写区间（例如 `11.6-22.8`）将生成的海拔曲线映射到该上下限内，同时保留轨迹的相对起伏。
 
-青龙定时任务：首次手工 `login --remember` 一次，之后定时挂 `run` 即可。
+青龙定时任务：首次手工 `login --remember` 一次，之后定时挂 `run` 即可（注意 `run` 现在只输出参数预览，不会上传）。
+
+## 风控自检（防封号 / 降风控）
+
+程序内置本地风控自检闸门（`src/safety.rs`），默认 fail-closed：
+
+- **深夜拦截**：默认 23:00–6:00 不提交 AI/跑步（可调）。
+- **每日上限**：AI 每日 ≤ 2 次；批量补签 ≤ 3 天，且总条数不越过每日 AI 上限。
+- **跑步上传闸门**：当前只生成合成轨迹，无法证明真实，`run` 一律禁止上传（即使 `--upload --confirm-upload UPLOAD` 也会被拒绝）；`run` 与 GUI 跑步页均为本地预览。
+
+策略持久化在 `config.json` 的 `safety` 对象（缺省即上述默认值），每日计数在 `safety_state.json`（跨天自动清零）。
+关闭或调整请自行评估后果，例如写入 `{"safety":{"enabled":false}}`。
+
+查看状态：`NekoSportsWorldTool safety`；清零今日计数：`NekoSportsWorldTool safety --reset`。
+
+更详细的低风控用法与单次提交参数建议见 [SAFETY.md](SAFETY.md)（防封号与风控指南）。
 
 ## 常见问题
 
 - **提示未登录 / 401**：先执行 `login --remember`（GUI 勾选记住密码等价），会话失效会自动重登
+- **`run` 不能上传 / 提示“已禁止上传”**：当前版本只生成合成轨迹，无法证明真实，按 fail-closed 禁止上传；真实成绩请使用学校认可的官方采集方式
+- **风控自检拦截（深夜 / 次数超限）**：改到白天、减少当天提交次数，或按需调整 `config.json` 的 `safety` 策略
 - **10121 设备风险**：设备身份是持久化的，删除 `identity.json` 等于换了新设备，不要频繁删
 - **10603 点位限流**：点位接口 5 分钟限 3 次，程序内置 300s 缓存，正常使用不会触发
 - **榜单为空**：当天还没有人产生有效里程，查询会自动回退最近 3 天

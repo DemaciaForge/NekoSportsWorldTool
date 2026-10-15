@@ -45,6 +45,8 @@ pub struct RunParams {
     pub amap_key: String,
 }
 
+/// 全链结果（当前受上传闸门保护，字段仅在兼容代码内写入）。
+#[allow(dead_code)]
 pub struct RunOutcome {
     pub result: SubmitResult,
     pub obs_ok: usize,
@@ -62,6 +64,60 @@ pub struct DryRunSummary {
     pub start_longitude: f64,
     pub min_speed_mps: f64,
     pub max_speed_mps: f64,
+}
+
+/// 仅校验并展示参数，不登录、不联网、不上传（GUI 本地参数预览 / CLI 默认 run）。
+pub fn preview_run_params(params: &RunParams) -> Result<Vec<String>, String> {
+    if !params.dist.is_finite() || params.dist <= 0.0 || params.dur <= 0 {
+        return Err("预览距离和时长必须为正数".into());
+    }
+    if params.start_ms <= 0 {
+        return Err("预览开始时间无效".into());
+    }
+    let start = chrono::Local
+        .timestamp_millis_opt(params.start_ms)
+        .single()
+        .ok_or("预览开始时间无效")?
+        .format("%Y-%m-%d %H:%M:%S");
+    let altitude = if let Some(range) = params.manual_altitude_range {
+        if !(-500.0..=9000.0).contains(&range.min_m)
+            || !(-500.0..=9000.0).contains(&range.max_m)
+            || range.min_m > range.max_m
+        {
+            return Err("预览海拔范围无效".into());
+        }
+        format!("手动海拔范围：{}–{} m", range.min_m, range.max_m)
+    } else if let Some(value) = params.manual_altitude {
+        if !value.is_finite() || !(-500.0..=9000.0).contains(&value) {
+            return Err("预览海拔必须是有限数值".into());
+        }
+        format!("手动海拔：{value} m")
+    } else {
+        "海拔来源：生成器（非实测）".into()
+    };
+    let route = match params.route_mode {
+        crate::track::generate_road::RouteMode::Road => "真实道路（路网/高德）",
+        crate::track::generate_road::RouteMode::Custom => "高德自定义路线",
+        crate::track::generate_road::RouteMode::Legacy => "经典打卡点拟合环",
+    };
+    let mut lines = vec![
+        "仅参数预览：不登录、不联网、不上传，也不验证运动是否真实发生。".into(),
+        format!(
+            "距离：{:.2} km · 时长：{} s · 开始：{start}",
+            params.dist / 1000.0,
+            params.dur
+        ),
+        format!("路线来源：{route}"),
+        altitude,
+    ];
+    if let Some(custom) = &params.custom {
+        lines.push(format!(
+            "自定义路线：{} → {}（绕圈={}，圈数={}）",
+            custom.origin, custom.destination, custom.loop_mode, custom.laps
+        ));
+    }
+    lines.push(super::submit::GENERATED_UPLOAD_BLOCKED.into());
+    Ok(lines)
 }
 
 fn dry_run_points(anchor: Coordinate) -> Vec<Value> {
@@ -204,6 +260,8 @@ pub fn run_full_flow(
     params: &RunParams,
     log: &mut dyn FnMut(&str),
 ) -> Result<RunOutcome, String> {
+    // 安全闸门：当前只生成合成轨迹，不允许上传（fail-closed）。
+    super::submit::ensure_run_upload_allowed()?;
     let sess: Session = client.login.clone().ok_or("未登录")?;
 
     // ① policy
@@ -671,8 +729,13 @@ pub fn run_ai_submit(
     mode: super::ai::AiMode,
     log: &mut dyn FnMut(&str),
 ) -> Result<Value, String> {
+    // 风控自检：深夜时段拦截、每日 AI 次数上限。
+    let policy = crate::api::model::load_config().safety;
+    let mut state = crate::safety::load_state();
+    crate::safety::check_ai(&policy, &state)?;
     log(&format!("[ai] 提交 sportId={sport_id} mode={mode:?}…"));
     let biz = super::ai::upload(client, sport_id, mode, None)?;
+    crate::safety::record_ai(&mut state);
     log("√ [ai] 提交成功");
     Ok(biz)
 }
@@ -715,6 +778,32 @@ mod tests {
         invalid.dur = 0;
         let error = run_dry_run(&invalid, Coordinate::new(39.9, 116.4, 0.0).unwrap()).unwrap_err();
         assert!(error.contains("时长"));
+    }
+
+    #[test]
+    fn preview_describes_generated_data_and_rejects_invalid_values() {
+        let lines = super::preview_run_params(&params()).unwrap();
+        assert!(lines.iter().any(|line| line.contains("不上传")));
+        assert!(lines.iter().any(|line| line.contains("路线来源")));
+        let mut invalid = params();
+        invalid.dist = f64::NAN;
+        assert!(super::preview_run_params(&invalid).is_err());
+        invalid = params();
+        invalid.manual_altitude = Some(f64::INFINITY);
+        assert!(super::preview_run_params(&invalid).is_err());
+    }
+
+    #[test]
+    fn generated_flow_is_blocked_before_login_or_network() {
+        let mut client = super::super::client::ApiClient::new(
+            crate::api::model::HeaderIdentity::default(),
+            None,
+        );
+        let mut log = |_: &str| panic!("被阻止的流程不应开始请求");
+        let error = super::run_full_flow(&mut client, &params(), &mut log)
+            .err()
+            .unwrap();
+        assert_eq!(error, super::super::submit::GENERATED_UPLOAD_BLOCKED);
     }
 }
 

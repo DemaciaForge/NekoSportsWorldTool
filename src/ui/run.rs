@@ -603,18 +603,14 @@ impl App {
         self.draw_custom_map(ui);
 
         ui.add_space(8.0);
-        let enabled = !self.run_busy && self.session.is_some();
-        let btn = if self.run_busy {
-            theme::primary_btn("提交中…")
-        } else {
-            theme::primary_btn("开始跑步")
-        };
+        let enabled = !self.run_busy;
+        let btn = theme::primary_btn("本地参数预览（不上传）");
         mobile::row(ui, |ui| {
             if ui.add_enabled(enabled, btn).clicked() {
-                self.start_run();
+                self.preview_run();
             }
             if self.session.is_none() {
-                ui.label("（请先登录）");
+                ui.label("（未登录也可预览）");
             }
         });
     }
@@ -984,8 +980,8 @@ impl App {
         });
     }
 
-    fn start_run(&mut self) {
-        // 参数变更时补齐方案；提交直接使用预计算值
+    /// 本地参数预览：不登录、不联网、不上传。
+    fn preview_run(&mut self) {
         self.run_page.ensure_plan();
         let page = &mut self.run_page;
         let plan = match page.plan.clone() {
@@ -1062,58 +1058,31 @@ impl App {
         self.config.custom_laps = page.custom_laps;
         let _ = crate::api::model::save_config(&self.config);
 
-        let identity = self.identity.clone();
-        let session = match self.session.clone() {
-            Some(s) => s,
-            None => {
-                self.status = "请先登录".into();
-                return;
-            }
+        let params = crate::api::flow::RunParams {
+            dist,
+            dur,
+            start_ms,
+            face_check,
+            manual_altitude,
+            manual_altitude_range,
+            track_color_mode,
+            seed: plan.seed,
+            route_mode,
+            ordinary_pick,
+            track_spec,
+            custom,
+            amap_key,
         };
-        self.run_busy = true;
-        self.status = "跑步提交中…".into();
-        let seed = plan.seed;
-        self.spawn_job(move |tx| {
-            let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
-            let params = crate::api::flow::RunParams {
-                dist,
-                dur,
-                start_ms,
-                face_check,
-                manual_altitude,
-                manual_altitude_range,
-                track_color_mode,
-                seed,
-                route_mode,
-                ordinary_pick,
-                track_spec,
-                custom,
-                amap_key,
-            };
-            let payload = match crate::api::flow::run_full_flow(&mut client, &params, &mut log) {
-                Ok(out) => {
-                    log(&format!(
-                        "全链完成 rrid={} obs={}/2 verify={} uuid={}",
-                        out.result.rrid, out.obs_ok, out.detail_ok, out.result.uuid
-                    ));
-                    serde_json::json!({
-                        "ok": true, "rrid": out.result.rrid,
-                        "obs_ok": out.obs_ok, "verify": out.detail_ok,
-                        "uuid": out.result.uuid,
-                        "dist": out.result.total_dis, "dur": out.result.total_time,
-                        "steps": out.result.total_steps, "avg_step_freq": out.result.avg_step_freq,
-                        "calorie": out.result.calorie, "avg_power": out.result.avg_power,
-                        "sel_distance": out.result.sel_distance, "start": out.result.start_ms,
-                    })
-                }
-                Err(e) => {
-                    log(&format!("跑步提交失败: {e}"));
-                    serde_json::json!({ "ok": false, "message": e })
-                }
-            };
-            tx.send(format!("__RUN_DONE__{payload}")).ok();
-        });
+        match crate::api::flow::preview_run_params(&params) {
+            Ok(lines) => {
+                self.status = "参数预览完成，未上传".into();
+                self.popup = Some(super::PopupInfo {
+                    title: "本地参数预览".into(),
+                    lines,
+                });
+            }
+            Err(error) => self.status = error,
+        }
     }
 }
 

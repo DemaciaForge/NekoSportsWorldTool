@@ -7,6 +7,7 @@ mod crypto;
 pub mod location;
 pub mod platform;
 mod relaunch;
+pub mod safety;
 pub mod template;
 mod textlog;
 mod track;
