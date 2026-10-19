@@ -44,7 +44,6 @@ pub const RUN_DETAIL: &str = "__RUN_DETAIL__";
 pub const UPDATE_CHK: &str = "__UPDATE_CHK__";
 pub const UPDATE_PROG: &str = "__UPDATE_PROG__";
 pub const UPDATE_DONE: &str = "__UPDATE_DONE__";
-pub const FENCE_DONE: &str = "__FENCE_DONE__";
 pub const POINTS_DONE: &str = "__POINTS_DONE__";
 
 /// 提交结果弹窗。
@@ -112,6 +111,38 @@ impl eframe::App for App {
         crate::platform::set_keep_screen_on(self.run_busy || self.ai_busy || self.login_busy);
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
 
+        self.draw_shell(ctx);
+
+        if let Some(p) = &self.popup {
+            let mut open = true;
+            let mut close = false;
+            egui::Window::new(egui::RichText::new(&p.title).strong())
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    ui.set_max_width((ctx.screen_rect().width() - 32.0).min(520.0));
+                    for line in &p.lines {
+                        ui.label(line);
+                    }
+                    ui.add_space(6.0);
+                    if ui.button("关闭").clicked() {
+                        close = true;
+                    }
+                });
+            if !open || close {
+                self.popup = None;
+            }
+        }
+        self.draw_update_windows(ctx);
+        crate::platform::sync_clipboard(ctx);
+    }
+}
+
+impl App {
+    fn draw_shell(&mut self, ctx: &egui::Context) {
         // ── 顶栏 ────────────────────────────────────────────────
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -138,31 +169,45 @@ impl eframe::App for App {
                 }
             };
             if compact {
-                ui.horizontal_wrapped(draw_connection);
-                ui.label(format!("设备：{}", self.identity.device_id));
-                ui.add_space(4.0);
-                ui.label("账号：");
-                mobile::text_edit(
-                    ui,
-                    "login_username",
-                    &mut self.username,
-                    crate::platform::InputKind::Text,
-                    ui.available_width(),
-                );
-                ui.label("密码：");
-                mobile::text_edit(
-                    ui,
-                    "login_password",
-                    &mut self.password,
-                    crate::platform::InputKind::Password,
-                    ui.available_width(),
-                );
                 ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(&mut self.remember, "记住密码");
-                    login_clicked = ui
-                        .add_enabled(!self.login_busy, theme::primary_btn(btn_text))
-                        .clicked();
+                    ui.label(if logged { "已登录" } else { "未登录" });
+                    if let Some(session) = &self.session {
+                        ui.label(&session.name);
+                    }
                 });
+                egui::CollapsingHeader::new("账号与登录")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("compact_account")
+                            .max_height((ctx.screen_rect().height() * 0.3).min(200.0))
+                            .show(ui, |ui| {
+                                ui.label(format!("设备：{}", self.identity.device_id));
+                                ui.add_space(4.0);
+                                ui.label("账号：");
+                                mobile::text_edit(
+                                    ui,
+                                    "login_username",
+                                    &mut self.username,
+                                    crate::platform::InputKind::Text,
+                                    ui.available_width(),
+                                );
+                                ui.label("密码：");
+                                mobile::text_edit(
+                                    ui,
+                                    "login_password",
+                                    &mut self.password,
+                                    crate::platform::InputKind::Password,
+                                    ui.available_width(),
+                                );
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.checkbox(&mut self.remember, "记住密码");
+                                    login_clicked = ui
+                                        .add_enabled(!self.login_busy, theme::primary_btn(btn_text))
+                                        .clicked();
+                                });
+                            });
+                    });
             } else {
                 egui::Grid::new("top_row1")
                     .num_columns(6)
@@ -213,7 +258,12 @@ impl eframe::App for App {
 
         // ── 底部状态栏 ──────────────────────────────────────────
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.add_space(4.0);
+            if mobile::compact_ui(ui) {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Label::new(&self.status).truncate());
+                });
+                return;
+            }
             ui.horizontal_wrapped(|ui| {
                 ui.label(format!("日志 {} 行", self.log.len()));
                 ui.separator();
@@ -279,50 +329,26 @@ impl eframe::App for App {
                 _ => self.draw_about(ui),
             }
         });
-
-        if let Some(p) = &self.popup {
-            let mut open = true;
-            let mut close = false;
-            egui::Window::new(egui::RichText::new(&p.title).strong())
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .order(egui::Order::Foreground)
-                .show(ctx, |ui| {
-                    ui.set_max_width((ctx.screen_rect().width() - 32.0).min(520.0));
-                    for line in &p.lines {
-                        ui.label(line);
-                    }
-                    ui.add_space(6.0);
-                    if ui.button("关闭").clicked() {
-                        close = true;
-                    }
-                });
-            if !open || close {
-                self.popup = None;
-            }
-        }
-        self.draw_update_windows(ctx);
-        crate::platform::sync_clipboard(ctx);
     }
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn from_state(
+        ctx: &egui::Context,
+        identity: HeaderIdentity,
+        session: Session,
+        config: Config,
+    ) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let (net_tx, net_rx) = std::sync::mpsc::channel();
-        let font_loaded = fonts::install(&cc.egui_ctx);
-        theme::apply(&cc.egui_ctx);
-        let identity = model::load_identity();
+        let font_loaded = fonts::install(ctx);
+        theme::apply(ctx);
         let device_buf = identity.clone();
-        let session = model::load_session();
-        let config = model::load_config();
         let username = config.username.clone();
         let password = config.password.clone();
         let remember = config.remember;
 
-        let mut app = Self {
+        Self {
             tx: tx.clone(),
             rx,
             log: log::LogStore::default(),
@@ -365,6 +391,7 @@ impl App {
                 map: map::MapState::default(),
                 preview: None,
                 preview_stale: true,
+                preview_inputs: None,
                 map_fitted: false,
             },
             ai_page: ai::AiPage {
@@ -384,7 +411,16 @@ impl App {
             },
             net_tx,
             net_rx,
-        };
+        }
+    }
+
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut app = Self::from_state(
+            &cc.egui_ctx,
+            model::load_identity(),
+            model::load_session(),
+            model::load_config(),
+        );
         if app.font_loaded.is_none() {
             app.log
                 .push("未找到中文字体（msyh/simhei/simsun），界面中文可能显示为方块");
@@ -407,7 +443,6 @@ impl App {
             app.refresh_records();
             app.refresh_user_page();
             app.refresh_ai_list();
-            app.refresh_fence();
             app.refresh_points();
         }
         // 已配置 OSM 路网则启动时后台加载
@@ -433,3 +468,6 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod layout_tests;

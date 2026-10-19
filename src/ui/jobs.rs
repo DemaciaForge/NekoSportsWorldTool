@@ -1,8 +1,8 @@
 //! 后台任务与消息处理：IP 获取 / 登录 / 刷新 / 消息协议分发。
 
 use super::{
-    App, AI_DETAIL, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE, POINTS_DONE, RANK,
-    RECORDS, RUN_DETAIL, SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER,
+    App, AI_DETAIL, AI_LIST, AI_RECORDS, CHEAT, IP, LOGIN_DONE, POINTS_DONE, RANK, RECORDS,
+    RUN_DETAIL, SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER,
 };
 use crate::api::model;
 use crate::track::generate_road::RouteMode;
@@ -80,30 +80,6 @@ impl App {
         });
     }
 
-    /// 后台拉取电子围栏并落盘（供预览裁剪/居中复用），完成后触发预览刷新。
-    /// 仅在真实道路路由模式下才需要围栏，避免经典模式用户也进入该端点请求指纹。
-    pub(crate) fn refresh_fence(&self) {
-        if self.run_page.route_mode != RouteMode::Road {
-            return;
-        }
-        let Some(session) = self.session.clone() else {
-            return;
-        };
-        let identity = self.identity.clone();
-        self.spawn_job(move |tx| {
-            let mut log = App::logger(tx.clone());
-            let mut client = crate::api::client::ApiClient::new(identity, Some(session));
-            match crate::api::fence::fetch_geo_fence(&mut client) {
-                Ok(f) => {
-                    let _ = crate::api::model::save_fence_cache(&f);
-                    log(&format!("√ [fence] 电子围栏已缓存 {} 个", f.len()));
-                    tx.send(FENCE_DONE.to_string()).ok();
-                }
-                Err(e) => log(&format!("⚠ [fence] 电子围栏获取失败: {e}")),
-            }
-        });
-    }
-
     /// 后台拉取实时点位并落盘（供路线预览使用），完成后触发预览刷新。
     /// 复用 fetch_points 的 TTL 缓存，仅在 Road 模式且锚点已配置时拉取。
     pub(crate) fn refresh_points(&self) {
@@ -123,12 +99,34 @@ impl App {
         self.spawn_job(move |tx| {
             let mut log = App::logger(tx.clone());
             let mut client = crate::api::client::ApiClient::new(identity, Some(session));
-            match crate::api::points::fetch_points(&mut client, anchor, &mut log) {
-                Ok(pts) => {
-                    log(&format!("√ [points] 点位已缓存 {} 个（供路线预览）", pts.len()));
-                    tx.send(POINTS_DONE.to_string()).ok();
+            let outcome = (|| -> Result<super::run::PreviewInputs, String> {
+                let policy = crate::api::policy::fetch_policy(&mut client)?;
+                let pts = crate::api::points::fetch_points(&mut client, anchor, &mut log)?;
+                if crate::api::points::points_bd(&pts).len() != pts.len() {
+                    return Err("点位坐标无效".into());
                 }
-                Err(e) => log(&format!("⚠ [points] 点位获取失败: {e}")),
+                let fences = crate::api::fence::fetch_geo_fence_response(&mut client)
+                    .map_err(|e| format!("无法确认预览围栏：{e}"))?
+                    .polygons;
+                let session = client.login.as_ref().ok_or("未登录")?;
+                Ok(super::run::PreviewInputs {
+                    uid: session.uid,
+                    unid: session.unid.clone(),
+                    anchor,
+                    points: crate::api::points::route_points(&policy.must_points, &pts),
+                    fences,
+                    loaded_ms: crate::crypto::envelope::now_ms(),
+                })
+            })();
+            match outcome {
+                Ok(inputs) => {
+                    tx.send(format!(
+                        "{POINTS_DONE}{}",
+                        serde_json::to_string(&inputs).unwrap()
+                    ))
+                    .ok();
+                }
+                Err(e) => log(&format!("⚠ [points] 预览数据获取失败：{e}")),
             }
         });
     }
@@ -393,6 +391,7 @@ impl App {
     /// 学期 + 违规自查（登录 / 跑步提交成功后自动调用）。
     pub fn refresh_data_page(&mut self) {
         let Some(session) = self.session.clone() else {
+            self.status = "请先登录".into();
             return;
         };
         let identity = self.identity.clone();

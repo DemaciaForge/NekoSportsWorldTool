@@ -17,8 +17,9 @@ pub struct PolicyInfo {
 }
 
 /// 从 policy 响应 `data` 中防御式提取必经点列表（字段名不确定，逐个尝试）。
-fn extract_must_points(v: &serde_json::Value) -> Vec<(f64, f64)> {
+fn extract_must_points(v: &serde_json::Value) -> Result<Vec<(f64, f64)>, String> {
     let data = v.get("data").unwrap_or(v);
+    let mut points = Vec::new();
     for name in [
         "pointList",
         "runPointList",
@@ -31,16 +32,24 @@ fn extract_must_points(v: &serde_json::Value) -> Vec<(f64, f64)> {
         "nodeList",
         "checkPointList",
     ] {
-        let Some(arr) = data.get(name).and_then(|x| x.as_array()) else {
+        let Some(value) = data.get(name).filter(|v| !v.is_null()) else {
             continue;
         };
-        // 复用 fence 的坐标系解析：BD 优先，缺失/全 0 回退 glat/glon（GCJ→BD）并过滤 (0,0)。
-        let pts: Vec<(f64, f64)> = arr.iter().filter_map(point_xy).collect();
-        if !pts.is_empty() {
-            return pts;
+        let arr = value
+            .as_array()
+            .ok_or_else(|| format!("策略点位 {name} 不是列表"))?;
+        for (index, value) in arr.iter().enumerate() {
+            let point =
+                point_xy(value).ok_or_else(|| format!("策略点位 {name}[{index}] 坐标无效"))?;
+            if !points
+                .iter()
+                .any(|p: &(f64, f64)| (p.0 - point.0).abs() < 1e-6 && (p.1 - point.1).abs() < 1e-6)
+            {
+                points.push(point);
+            }
         }
     }
-    Vec::new()
+    Ok(points)
 }
 
 /// body：{"runMode":1,"ruleUpdateTime":0,"geoFenceUpdateTime":0,"selectUnid":<unid>,"operateType":0}
@@ -77,6 +86,31 @@ pub fn fetch_policy(client: &mut ApiClient) -> Result<PolicyInfo, String> {
             .and_then(|t| t.as_i64())
             .unwrap_or(1000),
         valid_time: rule.get("validTime").and_then(|t| t.as_i64()).unwrap_or(0),
-        must_points: extract_must_points(&biz),
+        must_points: extract_must_points(&biz)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn merges_all_recognized_lists_without_losing_first_point() {
+        let a = json!({"lat":39.9,"lon":116.4});
+        let b = json!({"lat":39.91,"lon":116.41});
+        let v = json!({"data":{"pointList":[a.clone()],"mustPoints":[a,b]}});
+        assert_eq!(
+            extract_must_points(&v).unwrap(),
+            vec![(39.9, 116.4), (39.91, 116.41)]
+        );
+        assert!(extract_must_points(&json!({"mustPoints":null}))
+            .unwrap()
+            .is_empty());
+    }
+    #[test]
+    fn malformed_required_points_are_errors_not_omissions() {
+        assert!(
+            extract_must_points(&json!({"mustPoints":[{}, {"lat":39.9,"lon":116.4}]})).is_err()
+        );
+        assert!(extract_must_points(&json!({"mustPoints":"bad"})).is_err());
+    }
 }

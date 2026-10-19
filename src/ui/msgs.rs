@@ -2,9 +2,8 @@
 
 use super::about::FinishAction;
 use super::{
-    App, PopupInfo, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, FENCE_DONE, IP, LOGIN_DONE,
-    POINTS_DONE, RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, UPDATE_CHK, UPDATE_DONE,
-    UPDATE_PROG, USER,
+    App, PopupInfo, AI_DETAIL, AI_DONE, AI_LIST, AI_RECORDS, CHEAT, IP, LOGIN_DONE, POINTS_DONE,
+    RANK, RECORDS, RUN_DETAIL, RUN_DONE, SEMESTER, UPDATE_CHK, UPDATE_DONE, UPDATE_PROG, USER,
 };
 use crate::api::model;
 use chrono::TimeZone;
@@ -15,8 +14,7 @@ impl App {
         let mut done_login = None;
         let mut done_run = None;
         let mut done_ai = None;
-        let mut done_fence = false;
-        let mut done_points = false;
+        let mut done_points = None;
         let mut records_json = None;
         let mut ai_list_json = None;
         let mut semester_json = None;
@@ -32,10 +30,8 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             if let Some(v) = msg.strip_prefix(IP) {
                 done_ip = Some(v.to_string());
-            } else if msg == FENCE_DONE {
-                done_fence = true;
-            } else if msg == POINTS_DONE {
-                done_points = true;
+            } else if let Some(payload) = msg.strip_prefix(POINTS_DONE) {
+                done_points = serde_json::from_str::<super::run::PreviewInputs>(payload).ok();
             } else if let Some(v) = msg.strip_prefix(LOGIN_DONE) {
                 done_login = Some(v.to_string());
             } else if let Some(v) = msg.strip_prefix(RUN_DONE) {
@@ -94,8 +90,12 @@ impl App {
                     self.log
                         .push(&format!("[osm] 路网加载成功：{nodes} 节点 / {bld} 建筑"));
                     self.network = Some(net);
+                    self.run_page.preview_stale = true;
                 }
                 Err(e) => {
+                    self.network = None;
+                    self.run_page.preview = None;
+                    self.run_page.preview_stale = true;
                     self.osm_page.status = format!("路网加载失败：{e}");
                     self.log.push(&format!("[osm] 路网加载失败：{e}"));
                 }
@@ -104,11 +104,21 @@ impl App {
         if let Some(ip) = done_ip {
             self.ip = ip;
         }
-        if done_fence {
-            self.run_page.preview_stale = true;
-        }
-        if done_points {
-            self.run_page.preview_stale = true;
+        if let Some(inputs) = done_points {
+            if self
+                .session
+                .as_ref()
+                .map(|s| s.uid == inputs.uid && s.unid == inputs.unid)
+                .unwrap_or(false)
+                && self
+                    .identity
+                    .anchor_coordinate()
+                    .map(|a| a == inputs.anchor)
+                    .unwrap_or(false)
+            {
+                self.run_page.preview_inputs = Some(inputs);
+                self.run_page.preview_stale = true;
+            }
         }
         if let Some(v) = done_login {
             self.login_busy = false;
@@ -148,7 +158,7 @@ impl App {
                 self.refresh_records();
                 self.refresh_user_page();
                 self.refresh_ai_list();
-                self.refresh_fence();
+                self.refresh_points();
             } else {
                 self.status = format!(
                     "登录失败：{}",
@@ -167,9 +177,6 @@ impl App {
                 );
                 self.popup = Some(run_popup(&val));
                 self.refresh_data_page();
-                // 提交末尾会随机漂移锚点并持久化，这里重载身份让 UI 锚点与磁盘一致，
-                // 并触发路线预览重算（点位缓存已在漂移后用新锚点重存）。
-                self.identity = model::load_identity();
                 self.run_page.preview_stale = true;
             } else {
                 self.status = format!("跑步提交失败：{}", val["message"].as_str().unwrap_or(""));
@@ -391,31 +398,45 @@ fn run_popup(v: &serde_json::Value) -> PopupInfo {
             v["avg_power"].as_i64().unwrap_or(0)
         ),
         format!("开始时间：{}", fmt_hms(v["start"].as_i64().unwrap_or(0))),
-        format!(
-            "OBS 上传：{}/2 · 详情验证：{}",
-            v["obs_ok"].as_i64().unwrap_or(0),
-            if v["verify"].as_bool().unwrap_or(false) {
-                "通过"
-            } else {
-                "未通过"
-            }
-        ),
+        "记录提交：成功".into(),
+        format!("OBS 上传：{}/2", v["obs_ok"].as_i64().unwrap_or(0)),
     ];
-    // 达标判定明细（详情接口 reasonList）
-    if let Ok(detail) = crate::api::flow::VERIFY_DETAIL.lock() {
-        if let Some(d) = detail.as_ref() {
-            if let Some(list) = d.get("reasonList").and_then(|x| x.as_array()) {
-                for r in list {
-                    let ok = r.get("complete").and_then(|x| x.as_bool()).unwrap_or(false);
-                    let reason = r.get("reason").and_then(|x| x.as_str()).unwrap_or("");
-                    lines.push(format!(
-                        "判定：{} {}",
-                        if ok { "达标" } else { "未达标" },
-                        reason
-                    ));
-                }
+    if let Ok(verification) =
+        serde_json::from_value::<crate::api::flow::Verification>(v["verification"].clone())
+    {
+        lines.push(format!(
+            "详情读取：{}",
+            if verification.detail.is_some() {
+                "成功"
+            } else {
+                "失败"
+            }
+        ));
+        lines.push(format!("服务端达标判定：{}", verification.label()));
+        if let Some(error) = verification.error {
+            lines.push(format!("详情错误：{error}"));
+        }
+        if let Some(list) = verification
+            .detail
+            .as_ref()
+            .and_then(|d| d.get("reasonList"))
+            .and_then(|v| v.as_array())
+        {
+            for r in list {
+                let label = match r.get("complete").and_then(|v| v.as_bool()) {
+                    Some(true) => "达标",
+                    Some(false) => "未达标",
+                    None => "未知",
+                };
+                lines.push(format!(
+                    "判定：{} {}",
+                    label,
+                    r["reason"].as_str().unwrap_or("")
+                ));
             }
         }
+    } else {
+        lines.push("详情读取：未知；服务端达标判定：未知".into());
     }
     PopupInfo {
         title: "跑步结果".into(),
@@ -460,5 +481,30 @@ fn ai_popup(v: &serde_json::Value) -> PopupInfo {
                 v["resp_msg"].as_str().unwrap_or("")
             ),
         ],
+    }
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn popup_separates_partial_upload_reading_and_grade() {
+        let failed = crate::api::flow::Verification::from_result(Ok(
+            json!({"complete":false,"reasonList":[{"complete":false,"reason":"点位未经过"}]}),
+        ));
+        let first = run_popup(&json!({"rrid":1,"obs_ok":1,"verification":failed}))
+            .lines
+            .join("\n");
+        assert!(first.contains("OBS 上传：1/2"));
+        assert!(first.contains("详情读取：成功"));
+        assert!(first.contains("服务端达标判定：未达标"));
+        let next = crate::api::flow::Verification::from_result(Err("offline".into()));
+        let second = run_popup(&json!({"rrid":2,"obs_ok":2,"verification":next}))
+            .lines
+            .join("\n");
+        assert!(second.contains("详情读取：失败"));
+        assert!(second.contains("服务端达标判定：未知"));
+        assert!(!second.contains("点位未经过"));
     }
 }

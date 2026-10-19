@@ -61,6 +61,16 @@ fn days_ago_label(days_ago: i64) -> String {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct PreviewInputs {
+    pub uid: i64,
+    pub unid: String,
+    pub anchor: crate::location::Coordinate,
+    pub points: Vec<(f64, f64)>,
+    pub fences: Vec<Vec<(f64, f64)>>,
+    pub loaded_ms: i64,
+}
+
 #[derive(Default)]
 pub struct RunPage {
     pub dist_min: f32,
@@ -85,6 +95,7 @@ pub struct RunPage {
     pub preview: Option<crate::track::generate_road::RoadPlan>,
     /// 预览是否过期（参数变更后置真）
     pub preview_stale: bool,
+    pub preview_inputs: Option<PreviewInputs>,
     /// 地图视野是否已适配
     pub map_fitted: bool,
 }
@@ -107,7 +118,7 @@ pub struct RunPlan {
     /// 秒
     pub dur: i64,
     pub start_ms: i64,
-    /// 本次方案的随机种子（预览与提交共用，保证所见即所得）
+    /// 本次方案的随机种子（预览与提交共用；提交时仍须重新校验策略和点位）
     pub seed: u64,
 }
 
@@ -402,7 +413,6 @@ impl App {
 
         // 切换到真实道路路由时按需拉取电子围栏与实时点位（经典模式不触发这些端点）。
         if self.run_page.route_mode == RouteMode::Road && prev_route != RouteMode::Road {
-            self.refresh_fence();
             self.refresh_points();
         }
 
@@ -498,6 +508,7 @@ impl App {
 
     fn draw_run_map(&mut self, ui: &mut egui::Ui) {
         if self.run_page.route_mode != RouteMode::Road {
+            ui.label("经典模式仅按点位拟合，不包含建筑避让；需要沿道路行进时请选择真实道路模式。");
             return;
         }
         let Some(net) = self.network.clone() else {
@@ -511,35 +522,48 @@ impl App {
             return;
         };
 
+        if ui.button("刷新路线点位与围栏").clicked() {
+            self.run_page.preview_inputs = None;
+            self.run_page.preview = None;
+            self.refresh_points();
+        }
+        let inputs = self
+            .run_page
+            .preview_inputs
+            .as_ref()
+            .filter(|input| {
+                self.session
+                    .as_ref()
+                    .map(|s| s.uid == input.uid && s.unid == input.unid)
+                    .unwrap_or(false)
+                    && self
+                        .identity
+                        .anchor_coordinate()
+                        .map(|a| a == input.anchor)
+                        .unwrap_or(false)
+                    && crate::crypto::envelope::now_ms() - input.loaded_ms
+                        < crate::api::model::POINTS_TTL_MS
+            })
+            .cloned();
+        let Some(inputs) = inputs else {
+            self.run_page.preview = None;
+            ui.label("等待路线点位与策略；过期后请刷新。提交前会重新校验最新数据。");
+            return;
+        };
         if self.run_page.preview_stale {
             self.run_page.preview = None;
             self.run_page.map_fitted = false;
             self.run_page.preview_stale = false;
-            // 点位缓存按锚点隔离（main 的串城市防护）；锚点无效时视为无缓存
-            let cached = self
-                .identity
-                .anchor_coordinate()
-                .ok()
-                .and_then(crate::api::model::load_points_cache_for);
-            if let Some((_ts, pts)) = cached {
-                let pts_bd = crate::api::points::points_bd(&pts);
-                if !pts_bd.is_empty() {
-                    let fences = crate::api::model::load_fence_cache().unwrap_or_default();
-                    match crate::track::generate_road::plan_road_view(
-                        &net,
-                        &pts_bd,
-                        plan.dist * 1000.0,
-                        plan.seed,
-                        &fences,
-                    ) {
-                        Ok(p) => self.run_page.preview = Some(p),
-                        Err(e) => self.status = format!("路线预览失败：{e}"),
-                    }
-                } else {
-                    self.status = "无打卡点缓存，提交后可回显轨迹".into();
-                }
-            } else {
-                self.status = "无打卡点缓存，提交后可回显轨迹".into();
+            match crate::track::generate_road::plan_road_view(
+                &net,
+                &inputs.points,
+                plan.dist * 1000.0,
+                plan.dur,
+                plan.seed,
+                &inputs.fences,
+            ) {
+                Ok(p) => self.run_page.preview = Some(p),
+                Err(e) => self.status = format!("路线预览失败：{e}"),
             }
         }
 
@@ -749,11 +773,14 @@ impl App {
                 Ok(out) => {
                     log(&format!(
                         "全链完成 rrid={} obs={}/2 verify={} uuid={}",
-                        out.result.rrid, out.obs_ok, out.detail_ok, out.result.uuid
+                        out.result.rrid,
+                        out.obs_ok,
+                        out.verification.label(),
+                        out.result.uuid
                     ));
                     serde_json::json!({
                         "ok": true, "rrid": out.result.rrid,
-                        "obs_ok": out.obs_ok, "verify": out.detail_ok,
+                        "obs_ok": out.obs_ok, "verification": out.verification,
                         "uuid": out.result.uuid,
                         "dist": out.result.total_dis, "dur": out.result.total_time,
                         "steps": out.result.total_steps, "avg_step_freq": out.result.avg_step_freq,
@@ -934,16 +961,18 @@ mod tests {
         p.regen_plan();
         let plan = p.plan.clone().unwrap();
 
-        let today = now.date_naive();
-        let want = Local
-            .with_ymd_and_hms(today.year(), today.month(), today.day(), 23, 59, 0)
-            .single()
-            .unwrap()
-            .timestamp_millis();
-        let now_ms = crate::crypto::envelope::now_ms();
-        assert_eq!(
-            plan.start_ms,
-            want.min(now_ms),
+        // Generation reads the clock between these two observations; requiring
+        // equality to a later millisecond makes this test intermittently fail.
+        let expected_at = |at: chrono::DateTime<Local>| {
+            Local
+                .with_ymd_and_hms(at.year(), at.month(), at.day(), 23, 59, 0)
+                .single()
+                .unwrap()
+                .timestamp_millis()
+                .min(at.timestamp_millis())
+        };
+        assert!(
+            (expected_at(now)..=expected_at(Local::now())).contains(&plan.start_ms),
             "指定时刻未按 min(填入, 现在) 处理"
         );
         assert_start_not_future(&plan);

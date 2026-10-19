@@ -1,10 +1,10 @@
 //! 数据页：学期完成度 / 违规自查 / 排行榜。
 
 use super::{mobile, theme, App};
-use chrono::TimeZone;
 use crate::api::cheat::CheatReport;
 use crate::api::rank::RankRow;
 use crate::api::semester::SemesterSummary;
+use chrono::TimeZone;
 use eframe::egui;
 
 #[derive(Default)]
@@ -18,15 +18,24 @@ pub struct DataPage {
 }
 
 pub const RANK_OPTIONS: [&str; 11] = [
-    "个人日榜", "个人月榜", "班级日榜", "班级月榜", "院系日榜", "院系月榜",
-    "室内日榜", "室内周榜", "室内月榜", "历史日榜", "历史月榜",
+    "个人日榜",
+    "个人月榜",
+    "班级日榜",
+    "班级月榜",
+    "院系日榜",
+    "院系月榜",
+    "室内日榜",
+    "室内周榜",
+    "室内月榜",
+    "历史日榜",
+    "历史月榜",
 ];
 
 impl DataPage {
     /// 榜单选择 → (kind, type参数)。
     pub fn selection(&self) -> (&'static str, i64) {
         match self.rank_sel {
-            0 => ("main", 11),  // type=1 sort=1
+            0 => ("main", 11), // type=1 sort=1
             1 => ("main", 12),
             2 => ("main", 21),
             3 => ("main", 22),
@@ -44,6 +53,7 @@ impl DataPage {
 impl App {
     pub fn draw_data(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
+            .id_salt("data_page")
             .auto_shrink([false, false])
             .show(ui, |ui| self.draw_data_content(ui));
     }
@@ -77,7 +87,10 @@ impl App {
                             ui.label("未拉取");
                         }
                     }
-                    if ui.add_enabled(!self.data_busy, theme::primary_btn("刷新")).clicked() {
+                    if ui
+                        .add_enabled(!self.data_busy, theme::primary_btn("刷新"))
+                        .clicked()
+                    {
                         self.refresh_data_page();
                     }
                 });
@@ -91,10 +104,7 @@ impl App {
                     match &self.data_page.cheat {
                         Some(c) => {
                             if c.is_clean() {
-                                ui.colored_label(
-                                    theme::ok(),
-                                    "自查：正常（self=null）",
-                                );
+                                ui.colored_label(theme::ok(), "自查：正常（self=null）");
                             } else {
                                 ui.colored_label(
                                     theme::err(),
@@ -109,45 +119,61 @@ impl App {
                             ui.label("未检查");
                         }
                     }
-                    if ui.add_enabled(!self.data_busy, theme::primary_btn("立即检查")).clicked() {
+                    if ui
+                        .add_enabled(!self.data_busy, theme::primary_btn("立即检查"))
+                        .clicked()
+                    {
                         self.refresh_cheat_only();
                     }
                 });
                 if self.data_page.show_cheat_list {
                     if let Some(c) = &self.data_page.cheat {
-                        egui::ScrollArea::vertical()
-                            .max_height(160.0)
-                            .show(ui, |ui| {
-                                if mobile::compact_ui(ui) {
-                                    for r in &c.list {
-                                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                                            ui.label(format!("姓名：{}", str_of(r, &["name", "userName", "studentName"])));
-                                            ui.label(format!("原因：{}", str_of(r, &["reason", "punishReason", "cause", "type"])));
-                                            ui.label(format!("时间：{}", time_of(r, &["createTime", "time", "date"])));
-                                            ui.label(format!("unid：{}", str_of(r, &["unid", "sid"])));
-                                        });
-                                        ui.add_space(4.0);
-                                    }
-                                } else {
-                                    egui::Grid::new("cheat_grid")
-                                        .num_columns(4)
-                                        .striped(true)
-                                        .show(ui, |ui| {
-                                            ui.strong("姓名");
-                                            ui.strong("原因");
-                                            ui.strong("时间");
-                                            ui.strong("unid");
-                                            ui.end_row();
-                                            for r in &c.list {
-                                                ui.label(str_of(r, &["name", "userName", "studentName"]));
-                                                ui.label(str_of(r, &["reason", "punishReason", "cause", "type"]));
-                                                ui.label(time_of(r, &["createTime", "time", "date"]));
-                                                ui.label(str_of(r, &["unid", "sid"]));
-                                                ui.end_row();
-                                            }
-                                        });
+                        mobile::list_area(ui, "cheat_list", 160.0, |ui| {
+                            if mobile::compact_ui(ui) {
+                                for r in &c.list {
+                                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                                        ui.label(format!(
+                                            "姓名：{}",
+                                            str_of(r, &["name", "userName", "studentName"])
+                                        ));
+                                        ui.label(format!(
+                                            "原因：{}",
+                                            str_of(r, &["reason", "punishReason", "cause", "type"])
+                                        ));
+                                        ui.label(format!(
+                                            "时间：{}",
+                                            time_of(r, &["createTime", "time", "date"])
+                                        ));
+                                        ui.label(format!("unid：{}", str_of(r, &["unid", "sid"])));
+                                    });
+                                    ui.add_space(4.0);
                                 }
-                            });
+                            } else {
+                                egui::Grid::new("cheat_grid")
+                                    .num_columns(4)
+                                    .striped(true)
+                                    .show(ui, |ui| {
+                                        ui.strong("姓名");
+                                        ui.strong("原因");
+                                        ui.strong("时间");
+                                        ui.strong("unid");
+                                        ui.end_row();
+                                        for r in &c.list {
+                                            ui.label(str_of(
+                                                r,
+                                                &["name", "userName", "studentName"],
+                                            ));
+                                            ui.label(str_of(
+                                                r,
+                                                &["reason", "punishReason", "cause", "type"],
+                                            ));
+                                            ui.label(time_of(r, &["createTime", "time", "date"]));
+                                            ui.label(str_of(r, &["unid", "sid"]));
+                                            ui.end_row();
+                                        }
+                                    });
+                            }
+                        });
                     }
                 }
             });
@@ -164,7 +190,10 @@ impl App {
                                 ui.selectable_value(&mut self.data_page.rank_sel, i, *opt);
                             }
                         });
-                    if ui.add_enabled(!self.data_busy, theme::primary_btn("查询")).clicked() {
+                    if ui
+                        .add_enabled(!self.data_busy, theme::primary_btn("查询"))
+                        .clicked()
+                    {
                         let (kind, subtype) = self.data_page.selection();
                         self.refresh_rank(kind, subtype);
                     }
@@ -176,41 +205,47 @@ impl App {
                 if self.data_page.rank_rows.is_empty() {
                     ui.label("（无数据）");
                 } else {
-                    egui::ScrollArea::vertical()
-                        .max_height(240.0)
-                        .show(ui, |ui| {
-                            if mobile::compact_ui(ui) {
-                                for r in &self.data_page.rank_rows {
-                                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                                        ui.strong(format!("#{}  {}", r.sort, r.name));
-                                        ui.label(format!(
-                                            "{:.2} km · {}",
-                                            r.length / 1000.0,
-                                            match r.gender { 1 => "男", 0 => "女", _ => "-" },
-                                        ));
-                                    });
-                                    ui.add_space(4.0);
-                                }
-                            } else {
-                                egui::Grid::new("rank_grid")
-                                    .num_columns(4)
-                                    .striped(true)
-                                    .show(ui, |ui| {
-                                        ui.strong("名次");
-                                        ui.strong("姓名");
-                                        ui.strong("里程");
-                                        ui.strong("性别");
-                                        ui.end_row();
-                                        for r in &self.data_page.rank_rows {
-                                            ui.monospace(r.sort.to_string());
-                                            ui.label(&r.name);
-                                            ui.monospace(format!("{:.2} km", r.length / 1000.0));
-                                            ui.label(match r.gender { 1 => "男", 0 => "女", _ => "-" });
-                                            ui.end_row();
-                                        }
-                                    });
+                    mobile::list_area(ui, "rank_list", 240.0, |ui| {
+                        if mobile::compact_ui(ui) {
+                            for r in &self.data_page.rank_rows {
+                                egui::Frame::group(ui.style()).show(ui, |ui| {
+                                    ui.strong(format!("#{}  {}", r.sort, r.name));
+                                    ui.label(format!(
+                                        "{:.2} km · {}",
+                                        r.length / 1000.0,
+                                        match r.gender {
+                                            1 => "男",
+                                            0 => "女",
+                                            _ => "-",
+                                        },
+                                    ));
+                                });
+                                ui.add_space(4.0);
                             }
-                        });
+                        } else {
+                            egui::Grid::new("rank_grid")
+                                .num_columns(4)
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.strong("名次");
+                                    ui.strong("姓名");
+                                    ui.strong("里程");
+                                    ui.strong("性别");
+                                    ui.end_row();
+                                    for r in &self.data_page.rank_rows {
+                                        ui.monospace(r.sort.to_string());
+                                        ui.label(&r.name);
+                                        ui.monospace(format!("{:.2} km", r.length / 1000.0));
+                                        ui.label(match r.gender {
+                                            1 => "男",
+                                            0 => "女",
+                                            _ => "-",
+                                        });
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+                    });
                 }
             });
     }
@@ -253,4 +288,3 @@ fn time_of(v: &serde_json::Value, keys: &[&str]) -> String {
     }
     "-".into()
 }
-

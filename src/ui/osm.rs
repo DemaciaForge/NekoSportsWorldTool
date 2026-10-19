@@ -170,6 +170,9 @@ impl App {
 
     /// 后台线程加载 OSM 路网，成功后经 `net_rx` 回传。
     pub fn load_osm_async(&mut self, path: String) {
+        self.network = None;
+        self.run_page.preview = None;
+        self.run_page.preview_stale = true;
         self.osm_page.path = path.clone();
         self.osm_page.busy = true;
         self.osm_page.status = format!("加载中：{path} …");
