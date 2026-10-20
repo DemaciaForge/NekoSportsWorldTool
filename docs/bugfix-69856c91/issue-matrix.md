@@ -16,3 +16,6 @@
 | [#83 且目前最新版本的经典卡卡使用缺失了常规点位，切了路网模式，且轨迹不在点位上仍能打卡成功](https://github.com/YanamiNeko/NekoSportsWorldTool/issues/83) | 源码缺陷修复 | 全部策略/实时点整理去重；普通点保持分类；漏点 isPass=false；道路轨迹漏点直接报错。 | 上传成功与服务端达标分开；服务器实际判定需服务端证据。 |
 | [#85 上传成功了但是没有点位，有什么影响吗？](https://github.com/YanamiNeko/NekoSportsWorldTool/issues/85) | 部分修复 | 点位包装统一，OBS 部分失败可见，结果提示不把详情可读当成达标。 | 官方展示和成绩影响取决于服务端及 App 版本，未进行真实提交验证。 |
 | [#64 我设置的是规定的时间但却不能用](https://github.com/YanamiNeko/NekoSportsWorldTool/issues/64) | 待补证据 | 协议日期与 OBS 目录统一北京时间；保留现有 UI 时间模式。 | 时间限制根因未确定，需要对应版本、完整错误及脱敏策略数据。 |
+
+
+学校路网后续需求已另行实现并回归，详见 school-road-report.md；此前议题的服务端及 Android 验证边界保持不变。

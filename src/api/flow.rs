@@ -93,17 +93,24 @@ pub fn run_full_flow(
     params: &RunParams,
     log: &mut dyn FnMut(&str),
 ) -> Result<RunOutcome, String> {
+    run_full_flow_cancellable(
+        client,
+        params,
+        log,
+        &crate::task_control::Control::default(),
+    )
+}
+
+pub fn run_full_flow_cancellable(
+    client: &mut ApiClient,
+    params: &RunParams,
+    log: &mut dyn FnMut(&str),
+    control: &crate::task_control::Control,
+) -> Result<RunOutcome, String> {
+    control.check()?;
     if !params.dist.is_finite() || params.dist <= 0.0 || params.dur <= 0 {
         return Err("距离和时长必须为正数".into());
     }
-    let road_network = if params.route_mode == RouteMode::Road {
-        let path = super::model::load_config().osm_path;
-        let mut net = crate::track::generate_road::load_network_path(&path)?;
-        crate::track::generate_road::align_network(&mut net);
-        Some(net)
-    } else {
-        None
-    };
     let sess: Session = client.login.clone().ok_or("未登录")?;
 
     // ① policy
@@ -115,13 +122,28 @@ pub fn run_full_flow(
     ));
     sleep_secs(2);
 
+    control.check()?;
+    log("[road] 获取并核对当前校区围栏…");
+    let fences = super::fence::fetch_geo_fence_response(client)
+        .map_err(|e| format!("无法确认本次围栏：{e}"))?;
+    let fences = if params.route_mode == RouteMode::Road && !fences.polygons.is_empty() {
+        super::campus::selected_response(
+            fences,
+            super::model::load_config().school_campus.as_ref(),
+            &sess.unid,
+        )?
+    } else {
+        fences
+    };
+
     // ② 实时点位（拒绝本地样本兜底）
     log("[points] 拉取实时点位…");
     if client.identity.has_unconfigured_default_location() {
         return Err("请先在设备信息页填写本次跑步所在城市和定位锚点，不能使用大连默认配置".into());
     }
     let anchor: Coordinate = client.identity.anchor_coordinate()?;
-    let pts = points::fetch_points(client, anchor, log)?;
+    let area_id = (fences.area.run_area_id >= 0).then(|| fences.area.run_area_id.to_string());
+    let pts = points::fetch_points_ext(client, anchor, area_id, log)?;
     if pts.is_empty() {
         return Err("实时点位为空 —— 拒绝本地样本兜底".into());
     }
@@ -149,8 +171,7 @@ pub fn run_full_flow(
     // Keep the user's location stable so preview and submission refer to the same campus.
     let mut params = *params;
     params.dur = crate::track::generate_road::effective_duration(params.dist, params.dur);
-    let fences = super::fence::fetch_geo_fence_response(client)
-        .map_err(|e| format!("无法确认本次围栏：{e}"))?;
+    control.check()?;
     log(&format!(
         "[track] 生成轨迹 {:.0}m / {}s（{} 点位）…",
         params.dist,
@@ -161,10 +182,26 @@ pub fn run_full_flow(
     let start_ms = params.start_ms + (rand::random::<u32>() % 5) as i64 * 1000;
     let mut track = match params.route_mode {
         RouteMode::Road => {
-            let filtered = crate::track::generate_road::apply_fences(
-                road_network.as_ref().unwrap(),
+            if !fences.polygons.is_empty() {
+                super::school_roads::validate_fences(&fences.polygons)?;
+            }
+            let config = super::model::load_config();
+            let mut net = super::school_roads::load_for_route_cancellable(
+                &config.osm_path,
+                &sess.unid,
                 &fences.polygons,
-            );
+                &route_pts,
+                false,
+                control,
+                log,
+            )?;
+            crate::track::generate_road::align_network(&mut net);
+            let filtered = crate::track::generate_road::apply_fences(&net, &fences.polygons);
+            log(if fences.polygons.is_empty() {
+                "[road] 学校边界未提供；沿点位闭环重复补足距离，无法保证校内范围"
+            } else {
+                "[road] 在学校围栏内沿点位闭环重复补足距离"
+            });
             crate::track::generate_road::build_road(
                 params.dist,
                 params.dur,
@@ -185,6 +222,7 @@ pub fn run_full_flow(
             &route_pts,
         ),
     };
+    control.check()?;
     if let Some(range) = params.manual_altitude_range {
         crate::track::altitude::override_bd_a_range(&mut track, range)?;
         log(&format!(
@@ -219,7 +257,8 @@ pub fn run_full_flow(
     let five = five_point_wrapper(&pts, &track, &fences.area);
 
     // ⑤ 提交（sportType=1）
-    log("[record] 提交跑步记录（sportType=1）…");
+    control.begin_submit()?;
+    log("[record] 提交跑步记录（已进入提交，不能撤回）…");
     let sp = SubmitParams {
         track,
         uid: sess.uid,

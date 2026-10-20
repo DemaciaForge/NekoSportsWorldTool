@@ -9,7 +9,72 @@ use crate::api::model;
 use chrono::TimeZone;
 
 impl App {
+    fn expire_road_session(&mut self) {
+        self.session_epoch = self.session_epoch.wrapping_add(1);
+        self.auth_guard
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.records_busy = false;
+        self.data_busy = false;
+        self.user_busy = false;
+        self.ai_busy = self.ai_submit_active;
+        self.records_page.detail_loading = false;
+        self.records_page.ai_detail_loading = false;
+        self.data_page.cheat = None;
+        self.data_page.semester = None;
+        self.user_page.info = None;
+        self.session = None;
+        model::clear_session();
+        self.auth_expired = true;
+        self.osm_page.cancel.cancel();
+        self.osm_page.request_id = self.osm_page.request_id.wrapping_add(1);
+        self.osm_page.busy = false;
+        self.run_page.preview_cancel.cancel();
+        self.run_page.preview_inputs = None;
+        self.run_page.preview = None;
+        self.run_page.preview_stale = true;
+        self.run_page.check = None;
+        self.status = crate::api::client::SESSION_EXPIRED.into();
+    }
+    fn handle_fetch_error(&mut self, message: &str) -> bool {
+        for (prefix, label) in [
+            (RECORDS, "跑步记录"),
+            (AI_LIST, "AI 项目"),
+            (AI_RECORDS, "AI 记录"),
+            (SEMESTER, "学期"),
+            (CHEAT, "违规检查"),
+            (RANK, "排行榜"),
+        ] {
+            let Some(payload) = message.strip_prefix(prefix) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+                return false;
+            };
+            let Some(error) = value.get("fetchError").and_then(|v| v.as_str()) else {
+                return false;
+            };
+            match prefix {
+                RECORDS | AI_RECORDS => self.records_busy = false,
+                AI_LIST => self.ai_busy = self.ai_submit_active,
+                CHEAT => {
+                    self.data_busy = false;
+                    self.data_page.cheat = None;
+                }
+                SEMESTER => {
+                    self.data_busy = false;
+                    self.data_page.semester = None;
+                }
+                RANK => self.data_busy = false,
+                _ => {}
+            }
+            self.status = format!("{label}刷新失败：{error}");
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn poll_messages(&mut self) {
+        self.poll_preview_results();
         let mut done_ip = None;
         let mut done_login = None;
         let mut done_run = None;
@@ -28,7 +93,31 @@ impl App {
         let mut update_prog = None;
         let mut update_done = None;
         while let Ok(msg) = self.rx.try_recv() {
-            if let Some(v) = msg.strip_prefix(IP) {
+            let msg = if let Some(wrapped) = msg.strip_prefix("__SESSION_JOB__") {
+                let Some((epoch, message)) = wrapped.split_once('|') else {
+                    continue;
+                };
+                if epoch.parse::<u64>().ok() != Some(self.session_epoch) {
+                    continue;
+                }
+                message.to_string()
+            } else {
+                msg
+            };
+            if self.handle_fetch_error(&msg) {
+                continue;
+            }
+            if let Some(v) = msg.strip_prefix("__ROAD_STAGE__") {
+                if let Some((id, stage)) = v.split_once('|') {
+                    if self.osm_page.busy
+                        && id.parse::<u64>().ok() == Some(self.osm_page.request_id)
+                    {
+                        self.osm_page.status = stage.to_string();
+                    }
+                }
+            } else if let Some(stage) = msg.strip_prefix("__RUN_STAGE__") {
+                self.status = stage.to_string();
+            } else if let Some(v) = msg.strip_prefix(IP) {
                 done_ip = Some(v.to_string());
             } else if let Some(payload) = msg.strip_prefix(POINTS_DONE) {
                 done_points = serde_json::from_str::<super::run::PreviewInputs>(payload).ok();
@@ -80,25 +169,106 @@ impl App {
 
         // OSM 路网加载回传
         while let Ok(res) = self.net_rx.try_recv() {
-            self.osm_page.busy = false;
-            match res {
+            if res.request_id != self.osm_page.request_id {
+                continue;
+            }
+            if let Some((uid, unid, anchor, token)) = &res.scope {
+                // A delayed failure from an old token cannot invalidate a fresh login.
+                if self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.uid == *uid && s.token != *token)
+                {
+                    continue;
+                }
+                if !self
+                    .session
+                    .as_ref()
+                    .map(|s| s.uid == *uid && s.unid == *unid)
+                    .unwrap_or(false)
+                    || self.identity.anchor_coordinate().ok() != *anchor
+                {
+                    self.osm_page.busy = false;
+                    self.network = None;
+                    self.run_page.preview = None;
+                    self.run_page.preview_inputs = None;
+                    self.osm_page.status = "学校或定位已变化，请重新获取路网".into();
+                    continue;
+                }
+            }
+            let refresh_manual_metadata = !res.pending
+                && !res.offline
+                && res.scope.is_none()
+                && res.inputs.is_none()
+                && res.result.is_ok()
+                && !self.config.osm_path.is_empty()
+                && self
+                    .session
+                    .as_ref()
+                    .is_some_and(model::Session::is_logged_in)
+                && self.run_page.route_mode == crate::track::generate_road::RouteMode::Road;
+            self.osm_page.busy = res.pending;
+            let expired = res.scope.is_some()
+                && (crate::api::client::is_session_expired(&res.warning)
+                    || res
+                        .result
+                        .as_ref()
+                        .err()
+                        .is_some_and(|e| crate::api::client::is_session_expired(e)));
+            if !res.campuses.is_empty() {
+                self.osm_page.campuses = res.campuses;
+                self.osm_page.selected_key = res.selected_key;
+                if let Some(session) = &self.session {
+                    let keep = self
+                        .config
+                        .school_campus
+                        .as_ref()
+                        .map(|s| s.school == session.unid && s.key == self.osm_page.selected_key)
+                        .unwrap_or(false);
+                    if !keep {
+                        self.config.school_campus = Some(crate::api::campus::Selection {
+                            school: session.unid.clone(),
+                            key: self.osm_page.selected_key.clone(),
+                            confirmed: false,
+                        });
+                    }
+                }
+            }
+            self.osm_page.offline = res.offline;
+            if let Some(inputs) = res.inputs {
+                self.run_page.preview_inputs = Some(inputs);
+            }
+            match res.result {
                 Ok(net) => {
                     let nodes = net.graph.node_count();
                     let bld = net.buildings.len();
                     self.osm_page.fitted = false;
-                    self.osm_page.status = format!("√ 路网加载成功：{nodes} 节点 / {bld} 建筑");
+                    self.osm_page.status = format!(
+                        "√ {}路网加载成功：{nodes} 节点 / {bld} 建筑",
+                        if self.osm_page.offline { "离线" } else { "" }
+                    );
+                    if !res.warning.is_empty() {
+                        self.osm_page.status.push_str(&format!("\n{}", res.warning));
+                    }
                     self.log
                         .push(&format!("[osm] 路网加载成功：{nodes} 节点 / {bld} 建筑"));
                     self.network = Some(net);
                     self.run_page.preview_stale = true;
+                    self.osm_page.cache_entries = crate::api::school_roads::entries();
+                    self.analyze_gpx();
                 }
                 Err(e) => {
                     self.network = None;
                     self.run_page.preview = None;
                     self.run_page.preview_stale = true;
-                    self.osm_page.status = format!("路网加载失败：{e}");
+                    self.osm_page.status = crate::road_status::explain(&e);
                     self.log.push(&format!("[osm] 路网加载失败：{e}"));
                 }
+            }
+            if expired {
+                self.expire_road_session();
+            } else if refresh_manual_metadata {
+                self.refresh_points();
             }
         }
         if let Some(ip) = done_ip {
@@ -129,6 +299,7 @@ impl App {
                     .get("session")
                     .and_then(|s| serde_json::from_value::<model::Session>(s.clone()).ok())
                 {
+                    self.auth_expired = false;
                     self.session = Some(sess);
                     self.status = format!(
                         "已登录：{}",
@@ -141,6 +312,7 @@ impl App {
                     // 兜底：从磁盘读（老版本消息格式）
                     let sess = model::load_session();
                     if sess.is_logged_in() {
+                        self.auth_expired = false;
                         self.session = Some(sess);
                         self.status = format!(
                             "已登录：{}",
@@ -179,10 +351,11 @@ impl App {
                 self.refresh_data_page();
                 self.run_page.preview_stale = true;
             } else {
-                self.status = format!("跑步提交失败：{}", val["message"].as_str().unwrap_or(""));
+                self.status = format!("跑步操作未完成：{}", val["message"].as_str().unwrap_or(""));
             }
         }
         if let Some(v) = done_ai {
+            self.ai_submit_active = false;
             self.ai_busy = false;
             let val: serde_json::Value = serde_json::from_str(&v).unwrap_or_default();
             if val.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
@@ -203,7 +376,7 @@ impl App {
             }
         }
         if let Some(v) = ai_list_json {
-            self.ai_busy = false;
+            self.ai_busy = self.ai_submit_active;
             match serde_json::from_str::<Vec<crate::api::ai::AiSport>>(&v) {
                 Ok(list) => {
                     self.status = format!("已拉取 {} 个 AI 项目", list.len());
@@ -240,6 +413,10 @@ impl App {
         if let Some(v) = user_json {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&v) {
                 self.user_page.info = Some(crate::api::user::MyInfo {
+                    errors: serde_json::from_value(
+                        val.get("errors").cloned().unwrap_or(serde_json::json!([])),
+                    )
+                    .unwrap_or_default(),
                     profile: val
                         .get("profile")
                         .cloned()
@@ -349,6 +526,23 @@ impl App {
         }
         if got_semester || got_cheat || got_rank {
             self.data_busy = false;
+        }
+        while let Ok(failure) = self.auth_rx.try_recv() {
+            if failure.epoch == self.session_epoch
+                && self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.uid == failure.uid && s.token == failure.token)
+            {
+                self.expire_road_session();
+            }
+        }
+        if self.auth_expired
+            && !self.login_busy
+            && !self.status.starts_with("登录失败")
+            && !self.status.starts_with("请填写")
+        {
+            self.status = crate::api::client::SESSION_EXPIRED.into();
         }
     }
 }

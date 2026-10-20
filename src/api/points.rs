@@ -92,10 +92,10 @@ pub fn fetch_points_ext(
     Ok(pts)
 }
 
-fn parse_points(payload: &Value) -> Result<Vec<Value>, String> {
-    super::client::check_business(payload)?;
+pub(crate) fn parse_points(payload: &Value) -> Result<Vec<Value>, String> {
+    let payload = super::client::check_business(payload)?;
     // pointsResModels：优先顶层，其次 data 子对象
-    let pts: Vec<Value> = super::client::get_field(payload, "pointsResModels")
+    let pts: Vec<Value> = super::client::get_field(&payload, "pointsResModels")
         .and_then(|m| m.as_array())
         .cloned()
         .unwrap_or_default();
@@ -151,6 +151,17 @@ pub fn route_points(required: &[(f64, f64)], live: &[Value]) -> Vec<(f64, f64)> 
 #[cfg(test)]
 mod route_tests {
     use super::*;
+    #[test]
+    fn direct_envelope_points_decode_json_text_business_data() {
+        let point = json!({"lat":"39.9","lon":"116.4","isMustPoint":false});
+        let data = json!({"pointsResModels":[point.clone()]});
+        let response = json!({"error":10000,"data":data.to_string()});
+        let points = parse_points(&response).unwrap();
+        assert_eq!(points, vec![point]);
+        assert_eq!(points_bd(&points), vec![(39.9, 116.4)]);
+        assert!(parse_points(&json!({"error":10000,"data":"{broken"})).is_err());
+    }
+
     #[test]
     fn response_errors_and_invalid_coordinates_are_not_cached_as_success() {
         let point = json!({"lat":39.9,"lon":116.4});

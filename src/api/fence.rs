@@ -22,15 +22,18 @@ pub fn fetch_geo_fence_response(client: &mut ApiClient) -> Result<GeoFenceRespon
     parse_response(&biz)
 }
 
-fn parse_response(biz: &Value) -> Result<GeoFenceResponse, String> {
+pub(crate) fn parse_response(biz: &Value) -> Result<GeoFenceResponse, String> {
+    let biz = super::client::normalize_business_data(biz)?;
     let mut result = GeoFenceResponse::default();
-    result.area.run_area_id = get_field(biz, "runAreaId")
-        .and_then(Value::as_i64)
-        .filter(|id| *id >= 0)
+    result.area.run_area_id = get_field(&biz, "runAreaId")
+        .and_then(run_area_id)
         .unwrap_or(-1);
-    let Some(value) = get_field(biz, "geoFences").filter(|v| !v.is_null()) else {
+    let value = get_field(&biz, "geoFences")
+        .or_else(|| biz.get("geoFences"))
+        .ok_or("围栏响应缺少 geoFences 字段，不能确认学校边界")?;
+    if value.is_null() {
         return Ok(result);
-    };
+    }
     let fences = value.as_array().ok_or("围栏列表格式无效")?;
     let mut normalized = Vec::new();
     for fence in fences {
@@ -64,6 +67,9 @@ fn parse_response(biz: &Value) -> Result<GeoFenceResponse, String> {
         }
         let mut f = fence.clone();
         f["points"] = json!(wire_points);
+        if let Some(id) = fence.get("runAreaId").and_then(run_area_id) {
+            f["runAreaId"] = json!(id);
+        }
         normalized.push(f);
         result.polygons.push(ring);
     }
@@ -83,7 +89,10 @@ pub(crate) fn point_xy(p: &Value) -> Option<(f64, f64)> {
         _ => {
             let (ga, go) = (field_num(p, &["glat"]), field_num(p, &["glon", "glng"]));
             match (ga, go) {
-                (Some(a), Some(o)) if valid_xy(a, o) => Some(gcj02_to_bd09(a, o)),
+                (Some(a), Some(o)) if valid_xy(a, o) => {
+                    let point = gcj02_to_bd09(a, o);
+                    valid_xy(point.0, point.1).then_some(point)
+                }
                 _ => None,
             }
         }
@@ -95,7 +104,17 @@ fn valid_xy(lat: f64, lon: f64) -> bool {
 }
 
 fn field_num(p: &Value, keys: &[&str]) -> Option<f64> {
-    keys.iter().find_map(|k| p.get(*k).and_then(|v| v.as_f64()))
+    keys.iter().find_map(|k| {
+        p.get(*k).and_then(|v| {
+            v.as_f64().or_else(|| v.as_str()?.trim().parse().ok())
+                .filter(|n: &f64| n.is_finite())
+        })
+    })
+}
+
+pub(crate) fn run_area_id(value: &Value) -> Option<i64> {
+    value.as_i64().or_else(|| value.as_str()?.trim().parse().ok())
+        .filter(|id| *id >= 0)
 }
 
 #[cfg(test)]
@@ -127,6 +146,43 @@ mod tests {
 mod metadata_tests {
     use super::*;
     #[test]
+    fn json_text_fences_and_numeric_strings_preserve_area_and_geometry() {
+        let data = json!({"runAreaId":"42","geoFences":[{"id":7,"runAreaId":"43","points":[
+            {"lat":"39.9","lon":"116.4"},
+            {"lat":"39.901","lon":"116.4"},
+            {"lat":"39.9","lon":"116.401"}
+        ]}]});
+        let object = parse_response(&json!({"error":10000,"data":data})).unwrap();
+        let encoded = parse_response(&json!({"error":10000,"data":data.to_string()})).unwrap();
+        assert_eq!(encoded.polygons, object.polygons);
+        assert_eq!(encoded.area.geo_fences, object.area.geo_fences);
+        assert_eq!(encoded.area.run_area_id, 42);
+        assert_eq!(encoded.area.geo_fences[0]["runAreaId"], 43);
+        assert_eq!(encoded.polygons[0][0], (39.9, 116.4));
+        assert_eq!(run_area_id(&json!("invalid")), None);
+        assert_eq!(run_area_id(&json!("-1")), None);
+    }
+
+    #[test]
+    fn missing_invalid_and_explicitly_empty_fences_remain_distinct() {
+        for data in [json!({"geoFences":null}), json!({"geoFences":[]})] {
+            let response = parse_response(&json!({"data":data.to_string()})).unwrap();
+            assert!(response.polygons.is_empty());
+            assert!(!response.area.freedom_show_fence);
+        }
+        let missing = parse_response(&json!({"data":"{}"})).err().unwrap();
+        assert!(missing.contains("缺少 geoFences"));
+        assert!(parse_response(&json!({"data":"{invalid"})).err().unwrap().contains("data JSON"));
+        for point in [json!({"lat":"NaN","lon":"116.4"}), json!({"lat":"91","lon":"116.4"}), json!({"lat":"39.9","lon":"inf"})] {
+            assert_eq!(point_xy(&point), None);
+        }
+        let gcj = json!({"lat":"0","lon":"0","glat":"39.9","glng":"116.4"});
+        let (lat, lon) = point_xy(&gcj).unwrap();
+        assert!(valid_xy(lat, lon));
+        assert_ne!((lat, lon), (39.9, 116.4));
+    }
+
+    #[test]
     fn normalized_coordinates_have_consistent_aliases() {
         let p = json!({"lat":0.0,"lon":0.0,"lng":0.0,"latitude":0.0,"longitude":0.0,"glat":39.9,"glon":116.4,"glng":0.0});
         let r = parse_response(&json!({"geoFences":[{"points":[p.clone(),p.clone(),p]}]})).unwrap();
@@ -140,7 +196,7 @@ mod metadata_tests {
     #[test]
     fn explicit_area_id_survives_absent_fences() {
         for value in [
-            json!({"runAreaId":42}),
+            json!({"runAreaId":42,"geoFences":null}),
             json!({"data":{"runAreaId":42,"geoFences":null}}),
         ] {
             let r = parse_response(&value).unwrap();
@@ -151,7 +207,6 @@ mod metadata_tests {
     #[test]
     fn optional_metadata_does_not_invent_ids() {
         for v in [
-            json!({}),
             json!({"geoFences":null}),
             json!({"geoFences":[]}),
         ] {
@@ -168,5 +223,6 @@ mod metadata_tests {
         assert_eq!(multiple.area.run_area_id, -1);
         assert!(parse_response(&json!({"geoFences":[{"points":[]}]})).is_err());
         assert!(parse_response(&json!({"geoFences":"bad"})).is_err());
+        assert!(parse_response(&json!({})).is_err());
     }
 }

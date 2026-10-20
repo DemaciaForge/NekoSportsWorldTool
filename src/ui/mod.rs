@@ -18,7 +18,9 @@ pub mod map;
 pub mod mobile;
 pub mod msgs;
 pub mod osm;
+mod preview_jobs;
 pub mod records;
+mod road_tools;
 pub mod run;
 pub mod theme;
 pub mod user;
@@ -53,7 +55,34 @@ pub struct PopupInfo {
 }
 
 /// 顶层 App。
+#[derive(Clone)]
+pub struct JobSender {
+    tx: Sender<String>,
+    auth: Option<crate::api::client::AuthContext>,
+}
+impl JobSender {
+    pub fn send(&self, message: String) -> Result<(), std::sync::mpsc::SendError<String>> {
+        self.tx.send(match &self.auth {
+            Some(context) => format!("__SESSION_JOB__{}|{message}", context.epoch),
+            None => message,
+        })
+    }
+    pub fn client(
+        &self,
+        identity: HeaderIdentity,
+        session: Option<Session>,
+    ) -> crate::api::client::ApiClient {
+        crate::api::client::ApiClient::new(identity, session).with_auth_context(self.auth.clone())
+    }
+}
+
 pub struct App {
+    #[cfg(test)]
+    route_fixture: Option<(String, std::path::PathBuf)>,
+    pub session_epoch: u64,
+    pub auth_guard: Arc<std::sync::atomic::AtomicBool>,
+    auth_tx: Sender<crate::api::client::AuthFailure>,
+    auth_rx: Receiver<crate::api::client::AuthFailure>,
     pub tx: Sender<String>,
     pub rx: Receiver<String>,
     pub log: log::LogStore,
@@ -69,8 +98,10 @@ pub struct App {
     pub password: String,
     pub remember: bool,
     pub login_busy: bool,
+    pub auth_expired: bool,
     pub run_busy: bool,
     pub ai_busy: bool,
+    pub ai_submit_active: bool,
     pub records_busy: bool,
     pub data_busy: bool,
     pub user_busy: bool,
@@ -90,8 +121,11 @@ pub struct App {
     /// 已加载的 OSM 路网（真实道路路由 + 地图显示共用）。
     pub network: Option<Arc<route_planner::RoadGraph>>,
     pub osm_page: osm::OsmPage,
-    net_tx: Sender<Result<Arc<route_planner::RoadGraph>, String>>,
-    net_rx: Receiver<Result<Arc<route_planner::RoadGraph>, String>>,
+    net_tx: Sender<osm::NetworkLoad>,
+    net_rx: Receiver<osm::NetworkLoad>,
+    preview_tx: Sender<preview_jobs::PreviewResult>,
+    preview_rx: Receiver<preview_jobs::PreviewResult>,
+    run_control: Arc<crate::task_control::Control>,
 }
 
 impl eframe::App for App {
@@ -148,7 +182,13 @@ impl App {
             ui.add_space(6.0);
             let compact = mobile::compact_ui(ui);
             let logged = self.session.is_some();
-            let btn_text = if logged { "登出" } else { "登录" };
+            let btn_text = if logged {
+                "登出"
+            } else if self.auth_expired {
+                "重新登录"
+            } else {
+                "登录"
+            };
             let mut login_clicked = false;
             let draw_connection = |ui: &mut egui::Ui| {
                 ui.label("IP：");
@@ -176,6 +216,7 @@ impl App {
                     }
                 });
                 egui::CollapsingHeader::new("账号与登录")
+                    .open(self.auth_expired.then_some(true))
                     .default_open(false)
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical()
@@ -341,6 +382,7 @@ impl App {
     ) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let (net_tx, net_rx) = std::sync::mpsc::channel();
+        let (preview_tx, preview_rx) = std::sync::mpsc::channel();
         let font_loaded = fonts::install(ctx);
         theme::apply(ctx);
         let device_buf = identity.clone();
@@ -348,7 +390,14 @@ impl App {
         let password = config.password.clone();
         let remember = config.remember;
 
+        let (auth_tx, auth_rx) = std::sync::mpsc::channel();
         Self {
+            #[cfg(test)]
+            route_fixture: None,
+            session_epoch: 0,
+            auth_guard: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            auth_tx,
+            auth_rx,
             tx: tx.clone(),
             rx,
             log: log::LogStore::default(),
@@ -362,8 +411,10 @@ impl App {
             password,
             remember,
             login_busy: false,
+            auth_expired: false,
             run_busy: false,
             ai_busy: false,
+            ai_submit_active: false,
             records_busy: false,
             data_busy: false,
             user_busy: false,
@@ -393,6 +444,7 @@ impl App {
                 preview_stale: true,
                 preview_inputs: None,
                 map_fitted: false,
+                ..Default::default()
             },
             ai_page: ai::AiPage {
                 days: 1,
@@ -411,6 +463,9 @@ impl App {
             },
             net_tx,
             net_rx,
+            preview_tx,
+            preview_rx,
+            run_control: Arc::new(crate::task_control::Control::default()),
         }
     }
 
@@ -443,7 +498,9 @@ impl App {
             app.refresh_records();
             app.refresh_user_page();
             app.refresh_ai_list();
-            app.refresh_points();
+            if app.config.osm_path.is_empty() {
+                app.refresh_points();
+            }
         }
         // 已配置 OSM 路网则启动时后台加载
         if !app.config.osm_path.is_empty() {
@@ -456,13 +513,36 @@ impl App {
     /// 后台任务（线程 + 日志 channel）。
     pub fn spawn_job<F>(&self, f: F)
     where
-        F: FnOnce(Sender<String>) + Send + 'static,
+        F: FnOnce(JobSender) + Send + 'static,
     {
-        let tx = self.tx.clone();
+        let tx = JobSender {
+            tx: self.tx.clone(),
+            auth: None,
+        };
         std::thread::spawn(move || f(tx));
     }
 
-    pub fn logger(tx: Sender<String>) -> impl FnMut(&str) {
+    pub fn spawn_session_job<F>(&self, f: F)
+    where
+        F: FnOnce(JobSender) + Send + 'static,
+    {
+        let tx = JobSender {
+            tx: self.tx.clone(),
+            auth: Some(crate::api::client::AuthContext {
+                epoch: self.session_epoch,
+                rejected: self.auth_guard.clone(),
+                notify: self.auth_tx.clone(),
+            }),
+        };
+        std::thread::spawn(move || f(tx));
+    }
+
+    fn renew_session_jobs(&mut self) {
+        self.session_epoch = self.session_epoch.wrapping_add(1);
+        self.auth_guard = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    }
+
+    pub fn logger(tx: JobSender) -> impl FnMut(&str) {
         move |s: &str| {
             tx.send(s.to_string()).ok();
         }

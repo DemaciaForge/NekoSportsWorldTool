@@ -1,12 +1,15 @@
 //! 轨迹层：生成器 / OBS 组装 / 官方卡路里。
 
 pub mod altitude;
+pub mod analysis;
 pub mod calorie;
 pub mod generate_road;
 pub mod generator;
 pub mod geom;
 pub mod model;
 pub mod postfix;
+pub mod route_view;
+mod school_track;
 pub mod stats;
 pub mod wire;
 

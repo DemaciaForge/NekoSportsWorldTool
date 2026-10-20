@@ -46,6 +46,8 @@ impl Session {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub school_campus: Option<super::campus::Selection>,
+    #[serde(default)]
     pub username: String,
     #[serde(default)]
     pub password: String,
@@ -108,6 +110,7 @@ fn default_update_check() -> String {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            school_campus: None,
             username: String::new(),
             password: String::new(),
             remember: false,
