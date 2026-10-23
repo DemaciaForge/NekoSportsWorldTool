@@ -1,74 +1,94 @@
-# PR Integration Report — 2026-10-23
+# 16 个开放 PR 审查、整合与验证报告
 
-## Summary
+审计日期：2026-10-23。本文仅记录本次实际复核的代码、远程状态和命令结果。
 
-- Upstream: `YanamiNeko/NekoSportsWorldTool`, baseline `origin/main` = `e229abdbab71e377b86632e588e607413af4b93c` (2026-10-20, PR #88).
-- Fork at audit: `DemaciaForge/NekoSportsWorldTool` `main` = `9ac21e4cddb2a3b71ee7dad17bc58e47af430b4e`; it is divergent and has fork-only history. No default-branch update was attempted.
-- Audited the 16 requested PRs against current API state and fetched heads. Integrated #43 and #52 only (2); no others integrated (14). Those two are workflow/UI changes. No executable release is in scope or published by this audit.
-- Branch: `integration/upstream-main-pr-audit-2026-10-23`; integrated HEAD recorded after report commit.
-- Safety scope: do not include changes enabling fabricated activity records or circumvention of required checkpoints, geofences, attendance, or authenticity checks. No real service requests were made.
+## 一、执行摘要
 
-## PR decisions
+- 上游仓库：`YanamiNeko/NekoSportsWorldTool`。
+- 本次刷新确认的上游 `main` 基线：`e229abdbab71e377b86632e588e607413af4b93c`（2026-10-20）。
+- Fork 默认分支当时为 `9ac21e4cddb2a3b71ee7dad17bc58e47af430b4e`，与上游分叉，含 Fork 独有历史；本次没有改动 Fork `main`。
+- 重新核对 16 个开放 PR。最终仅保留 #43；#52 曾短暂整合，但导致 10 项既有 UI 可达性测试失败，干净上游基线全部通过，故已从整合分支撤回并暂缓。
+- 当前分类：完整采用 1 项（#43）；部分采用 0 项；修复后采用 0 项；暂缓 6 项（#42、#52、#57、#66、#79、#82）；不纳入 9 项（#41、#44、#51、#53、#60、#63、#105、#106、#107）。
+- 没有创建二进制 Release。上游现有程序及本分支并未完成防止合成活动记录被真实提交的整体安全改造；按本任务安全边界，不发布可用于此类提交的公开二进制。
+- 没有向真实校园运动服务发请求，也没有使用真实凭据或个人运动数据。
 
-| PR | Current state / head | Review and decision | Validation |
+## 二、PR 审核总表
+
+下表中的状态和 head SHA 是 2026-10-23 查询所得。GitHub 的可合并状态仅是文本合并提示，不代表语义正确。
+
+| PR | 标题 | 作者 | 状态 / head | 重复、冲突与风险 | 本次决定及依据 |
+|---|---|---|---|---|---|
+| #41 | 指标修复与已验证整合内容 | DemaciaForge | OPEN / `3a725bfd`；文本冲突 | 覆盖指标、轨迹生成、策略、提交和 UI；与 #60/#106 重叠 | 不纳入：触及合成轨迹与活动提交语义，需拆分并按真实性边界复核。 |
+| #42 | 提交时围栏元数据可选 | DemaciaForge | OPEN / `c7b3a17c`；可合并 | 仅 `wire.rs`，与 #53 的围栏缺失/空值语义相交 | 暂缓：需要固定协议样例，证明缺失、无效、显式空围栏不会被混为一类。 |
+| #43 | Windows/Android 测试拆分与发布治理 | DemaciaForge | OPEN / `29e7fbe7`；可合并 | 增加 Windows 测试与 Android 冒烟工作流，并限制自动发布触发范围 | 完整采用：维护性改动；通过当前工作区检查与测试。 |
+| #44 | 可选田径跑道模式 | DemaciaForge | OPEN / `cd05b7ba`；文本冲突 | 增加田径模式并进入轨迹生成和运行参数路径 | 不纳入：改变生成活动轨迹行为，超出安全整合范围。 |
+| #51 | 道路模式必经点及普通点强制经过 | laotierocket / Skylar | OPEN / `41694e3d`；文本冲突 | 修改路网、点位选择、轨迹生成及提交标记；与 #60/#107 的点位语义交叠 | 不纳入：涉及合成轨迹强制经过打卡点并改变提交标记。 |
+| #52 | 响应式免费分发水印 | DemaciaForge | OPEN / `ba507ddf`；可合并 | 底部保留面板压缩窄屏内容区域 | 暂缓：整合分支曾出现 10 项 UI 可达性失败；撤回 #52 后全套测试通过。需先修正布局并再次验证。 |
+| #53 | 校园跑可选绿色电子围栏 | DemaciaForge | OPEN / `4b462edd`；文本冲突 | 覆盖围栏、点位、策略、轨迹生成和 UI；与 #42 语义相交 | 不纳入：直接改变围栏与活动生成/提交路径。 |
+| #57 | 跨平台定位、地图选点、在线路网与登录备份 | LightWhite520 | OPEN / `4f4fcc98`；可合并 | 45 个文件，涵盖系统定位、在线路网、路线和登录资料归档 | 暂缓：范围过宽；登录备份需要独立隐私/密钥审查，路线部分需独立真实性审查。 |
+| #60 | 保留 road 有效里程并补齐打卡完成标记 | DemaciaForge | OPEN / `299b5b94`；文本冲突 | 改变有效里程、时间窗口、点位标记和 wire payload；与 #41/#51/#106/#107 相交 | 不纳入：会改变合成活动提交数据和打卡完成状态。 |
+| #63 | 手绘路线、高德自定义路线及轨迹导入 | Autumn984 | OPEN / `2544735b`；文本冲突 | 21 个文件，导入/自定义路线进入轨迹生成；与 #57/#66 路线能力重叠 | 不纳入：核心路径会把自定义或导入轨迹用于活动生成。 |
+| #66 | 将 leisure=track 跑道纳入路网并连接孤立图 | jie6886 / Flip131 | OPEN / `d3858166`；可合并 | 路网加载器变化，为路线规划增加道路来源 | 暂缓：没有确认可脱离活动轨迹生成而独立发布的安全范围。 |
+| #79 | Windows 与 Android 青绿色卡片 UI 改版 | kek2233 / keke | OPEN / `02df1401`；可合并 | 21 个文件，大规模 UI 重写并含 vendored winit Android 改动 | 暂缓：需要独立 Windows/Android 回归和对 vendored 修改的兼容性审查。 |
+| #82 | 所有时间统一按北京时间 | cokeenet / Cokee | OPEN / `ac982859`；文本冲突 | 改动几何、排名、wire 时间；与 #41/#60/#106 的窗口语义相关 | 暂缓：需补充跨时区输入/输出与窗口边界兼容性测试。 |
+| #105 | 自由跑模式 | neo0y / yangzhiying | OPEN / `b0043693`；可合并 | 增加无打卡点自由跑和单独提交路径 | 不纳入：核心功能绕过学校配置的必经打卡点。 |
+| #106 | 打卡点位置、10 秒窗口统计与点位拉取距离 | ConCosew / ConCose | OPEN / `1d8d3921`；可合并 | 轨迹窗口、点位位置和提交数据，与 #41/#60/#82/#107 相交 | 不纳入：改变合成轨迹和打卡提交语义。 |
+| #107 | 普通点位达标计数测试 | DemaciaForge | OPEN / `a16d1f8f`；可合并 | 测试断言普通打卡点应计为通过并计入达标数量 | 不纳入：虽仅改测试，但其验证对象直接是打卡计数/真实性逻辑。 |
+
+## 三、依赖与冲突分析
+
+- #41、#60、#106 共用轨迹指标、有效距离/时间、窗口和提交路径；#82 又与时间戳及窗口边界相交。应先明确唯一的数据契约，再分别做固定样例和跨时区测试。
+- #42 与 #53 均处理围栏元数据，但必须区分字段缺失、坐标无效和显式空围栏；不能通过默认值把状态折叠。
+- #44、#57、#63、#66、#79 涉及路线、地图、跑道、平台 UI 或运行模式。#57/#79 改动范围较大，#63/#66 改变路线来源/图加载；需要平台测试和独立的活动真实性审查。
+- #51、#60、#107 交叠在必经点、普通点分类、通过标记和达标数量；本次均未纳入。
+- #43 与轨迹业务逻辑独立，可以单独采用；#52 本身不改协议，但窄屏布局回归已由对照测试确认，因此暂缓。
+- 上述 GitHub 冲突状态中，#41/#44/#51/#53/#60/#63/#82 报告有文本冲突。其余 PR 的“可合并”状态不说明逻辑兼容。
+
+建议维护顺序：先单独处理 #43；#52 修复窄屏布局并通过同一组 UI 回归后再审。#42/#53 和 #41/#60/#106/#82 应按语义组协同验证。任何涉及合成活动提交、绕过必经点或围栏的功能不进入本次安全发布范围。
+
+## 四、实际整合记录
+
+1. 从刷新后的 upstream `main` `e229abdbab71e377b86632e588e607413af4b93c` 建立 `integration/upstream-main-pr-audit-2026-10-23`。
+2. 合入 PR #43，head `29e7fbe7580fcf740a4d708ab5a57cdab1a6d62c`，改动 workflow 与 Android CI 脚本，无文本冲突。
+3. 暂时合入 #52 head `ba507ddf4f01af66fa290ad041c4e28baab2711b` 后，发现 10 个 UI 布局可达性断言失败；干净 upstream 对照通过。随后以 revert 提交 `8c95f6e` 完整撤回 #52，保留全部断言。
+4. 最终分支只保留 #43 的代码变更和这份报告；#52 不在最终代码中。没有 cherry-pick 或声称纳入其他 PR。
+
+## 五、测试与构建结果
+
+| 命令 | 干净 upstream 基线 | 最终整合分支 | 结论 |
 |---|---|---|---|
-| #41 | OPEN, `3a725bfd` | Defer/reject for this integration: broad track generation, metric, policy, submit, CLI and UI changes. Includes record-generation/submission behavior and overlaps #60/#106. | Diff inspected; no integration. |
-| #42 | OPEN, `c7b3a17c` | Defer: optional fence metadata changes submission wire behavior and overlaps #53. Requires protocol compatibility evidence; not necessary for maintenance-only scope. | Diff inspected; no integration. |
-| #43 | OPEN, `29e7fbe7` | Adopt: separates Windows tests, Android smoke checks, and constrains automated Release creation to upstream tag pushes. | Integrated, ancestry verified. Full tests below fail on UI layout tests. |
-| #44 | OPEN, `cd05b7ba` | Reject for this integration: adds athletics route mode and generated track behavior, within prohibited activity-record generation scope. | Diff inspected; no integration. |
-| #51 | OPEN, `41694e3d` | Reject for this integration: forces required and ordinary checkpoints through generated road routes and changes submission markers; directly intersects required checkpoint/authenticity controls. | Diff inspected; no integration. |
-| #52 | OPEN, `ba507ddf` | Adopt: responsive open-source/free-distribution watermark in a reserved UI panel; no activity protocol changes. | Integrated, ancestry verified; full suite has existing layout failures. |
-| #53 | OPEN, `4b462edd` | Reject for this integration: changes fence, point selection, policy and route generation/submission paths; directly touches geofence behavior. | Diff inspected; no integration. |
-| #57 | OPEN, `4f4fcc98` | Defer/reject: large cross-platform location, login archive, online road and route/UI change set. Login backup expands sensitive-data handling; route and location behavior needs separate privacy and authenticity review. | Diff/path inventory inspected; no integration. |
-| #60 | OPEN, `299b5b94` | Reject for this integration: generated road validity distance/time and checkpoint completion wire semantics alter submitted activity data. | Diff inspected; no integration. |
-| #63 | OPEN, `2544735b` | Reject for this integration: hand-drawn/imported/custom routes feed generated run tracks; directly within prohibited synthetic activity scope. | Diff/path inventory inspected; no integration. |
-| #66 | OPEN, `d3858166` | Defer: only route-planner road graph loader, adding athletics tracks and connecting components. This is route generation infrastructure; no safe standalone non-activity portion established. | Diff inspected; no integration. |
-| #79 | OPEN, `02df1401` | Defer: broad Windows/Android UI redesign plus vendored winit platform patch and large UI rewrites; too broad for the maintenance-only integration and needs platform-specific regression review. | Diff/path inventory inspected; no integration. |
-| #82 | OPEN, `ac982859` | Defer: Beijing-time formatting affects geometry, ranking and wire timestamps; overlaps track window behavior in #41/#60/#106. Needs focused timestamp compatibility tests. | Diff inspected; no integration. |
-| #105 | OPEN, `b0043693` | Reject for this integration: free-run mode bypasses configured checkpoints and adds a distinct submit path. Core feature falls within prohibited authenticity/checkpoint circumvention scope. | Diff inspected; no integration. |
-| #106 | OPEN, `1d8d3921` | Reject for this integration: checkpoint coordinates and 10-second window statistics change generated track/checkpoint submission behavior. | Diff inspected; no integration. |
-| #107 | OPEN, `a16d1f8f` | Reject for this integration: despite being test-only, it asserts ordinary checkpoint pass counting, directly validating the disallowed checkpoint/submission behavior. | Diff inspected; no integration. |
+| `cargo test --workspace --locked --offline` | 182 主库测试、8 route-planner 单测、7 集成测试全部通过；0 失败 | 同样 182 + 8 + 7 全部通过；0 失败 | 通过。对照证明 #52 带来此前观察到的布局失败；撤回后恢复基线。 |
+| `cargo check --all-targets --locked --offline` | 未运行 | 成功，exit code 0 | 通过（最终整合分支）。 |
+| `git diff --check` | 未运行 | 成功，exit code 0 | 通过（最终整合分支）。 |
+| `cargo fmt --check` | 上游/整合代码报告大量格式差异 | 未通过；之前未自动格式化 | 格式检查失败；未运行全仓格式化以避免无关改动。 |
+| Android emulator smoke / Android 目标编译 | 未运行 | 未运行 | 未验证。 |
+| `cargo build --release --locked` | 未运行 | 未运行 | 未生成二进制；安全发布门槛不满足。 |
 
-All requested PR heads currently target `main`; GitHub reported #41, #44, #51, #53, #60, #63, and #82 conflicting when queried. #43/#52 and several others were reported mergeable, which was not treated as correctness evidence. GitHub CI/review data was empty for most PRs at query time; only #43 showed a successful “Full Cargo test suite” status. Current head SHAs are in the table and can be rechecked at the linked PR pages.
+测试期间有 Windows linker 的 stdout 警告；没有测试失败。当前没有外部 CI 对本整合分支的成功记录。
 
-## Dependencies and conflicts
+## 六、已确认问题及剩余风险
 
-- #41/#60/#106 all overlap track metrics, valid distance/time, checkpoint windows and submit flow; do not combine without resolving a single explicit data contract.
-- #42/#53 overlap fence metadata and fallback behavior; optional/missing/empty fence states need distinct protocol fixtures.
-- #44/#57/#63/#66/#79 overlap routes, map/UI, track mode and platform code; #63/#66 add route-generation inputs and #57/#79 are broad cross-platform changes.
-- #51/#60/#107 overlap checkpoint classification, route selection and pass markers. This audit excludes all three from the integration.
-- #43/#52 are independent: workflow/release governance and reserved-panel UI. They merged without textual conflicts.
-- #82 overlaps timestamp and route-window semantics with #41/#60/#106.
-- #105 introduces a separate free-run mode and shares submit/track/UI paths with #41/#51/#60/#106/#107.
+- #52 的窄屏 UI 回归为已复现问题：含 #52 的整合分支 173 项测试通过、10 项布局可达性失败；干净 upstream 为 182 + 8 + 7 项全通过；撤回 #52 后最终分支同样全通过。建议 #52 作者/维护者缩小或重新布局底栏后复测。
+- `cargo fmt --check` 仍未通过。差异遍布既有代码，未在本次进行全仓格式化，避免把格式噪声混入审查。
+- Android 模拟器冒烟、Android 交叉编译、Clippy、Release 构建均未执行。
+- 本次整合没有重构 upstream 既有的活动提交能力；因此不能据此产出公开二进制。代码审查分支只作审计与维护用途。
+- PR 头、CI、评论和评审线程可能变化；再次操作前应重新查询。没有向真实服务提交，也未使用真实凭据或个人数据。
 
-Suggested maintainer review order for safe maintenance: #43, then #52. Review #57 login archive/privacy and location components separately from any route-submission features. Keep route generation and activity submission PRs out of a safe public binary until their behavior meets the project’s authenticity requirements. No PR order can make prohibited behavior acceptable.
+## 七、对维护者的建议
 
-## Integration and test evidence
+- 可合并/本次已整合：#43（CI 工作流拆分和发布触发治理）。
+- 修复后再审：#52（先修复窄屏布局失败并重跑 UI 全套测试）。
+- 暂缓并补证据：#42（围栏缺失/空值协议夹具）、#57（登录归档隐私与平台拆分）、#66（路线图加载与活动生成边界）、#79（Windows/Android UI 和 vendored winit 回归）、#82（跨时区窗口测试）。
+- 不建议纳入本安全整合：#41、#44、#51、#53、#60、#63、#105、#106、#107。理由分别见审核总表；这是本次范围/安全建议，不代表维护者已作决定。
 
-- Baseline `e229abdbab71e377b86632e588e607413af4b93c`; branch created cleanly from refreshed upstream main.
-- Merged #43 (`29e7fbe7580fcf740a4d708ab5a57cdab1a6d62c`) and #52 (`ba507ddf4f01af66fa290ad041c4e28baab2711b`) with merge commits; both PR heads are ancestors of the branch.
-- `git diff --check`: passed.
-- `cargo fmt --check`: failed on widespread formatting differences already present in upstream baseline; no mass-formatting applied.
-- `cargo test --workspace --locked --offline`: failed, 173 passed, 10 failed, 0 ignored. Failures are UI layout reachability assertions (`outer scroll cannot reach ...`) across phone/desktop cases. One linker warning was emitted. Because the same run included new watermark UI and no clean-baseline comparison was run, attribution to upstream vs #52 is unresolved; this is a release blocker.
-- Not run: all-target check, Clippy, Android build/emulator smoke test, external CI on this integration branch, or live-service validation. No service was contacted.
-- Fork release inventory included v0.4.1 and older fork releases. No new tag or release created.
+## 八、远程结果与版本信息
 
-## Remote publication and remaining work
+- Fork 整合分支已推送：<https://github.com/DemaciaForge/NekoSportsWorldTool/tree/integration/upstream-main-pr-audit-2026-10-23>
+- 本报告对应提交：以推送后核验的最新分支 SHA 为准。
+- Fork `main` 未变；未创建新 tag 或 Release，故没有本次下载文件或 SHA-256。
+- Fork 已有历史 Release（包括 v0.4.1）；这些历史发布不属于本次整合结果。
+- 上游 Issue #108 更新后链接：<https://github.com/YanamiNeko/NekoSportsWorldTool/issues/108>。
 
-Fork `main` is divergent from upstream and was not modified. This audit branch was prepared for publication to the fork; verify the final remote ref and SHA before sharing. No binary Release was created because the full suite failed and the requested activity authenticity boundary excludes the route/submission PRs. No upstream Issue was created in this audit; an issue draft follows.
+## 九、非官方声明
 
-Remaining risks: determine whether UI layout failures reproduce on untouched upstream baseline; resolve them before treating #52 as validated. Run Android smoke and `cargo check --all-targets --locked` in suitable CI. Re-review current PR heads, CI and review threads before any later action. Review Fork v0.4.1 contents independently; its existence does not establish that all claimed PRs are safe or integrated.
-
-## Draft upstream issue
-
-**Title:** [Integration Report] Review of 16 open PRs against current main
-
-**Body:**
-
-Community review of the 16 PRs listed in the October 23, 2026 audit request, against upstream `main` at `e229abdbab71e377b86632e588e607413af4b93c`. This is an independent, non-official audit in a personal fork; it does not represent upstream acceptance or endorsement.
-
-The audit integrated only maintenance/UI PRs #43 and #52 on branch `integration/upstream-main-pr-audit-2026-10-23`. The full offline workspace test run reported 173 passed and 10 failed, all UI layout reachability assertions; `cargo fmt --check` also reports pre-existing formatting differences. Android smoke and all-target check remain unrun. No release was created. The fork branch/report URL should be added after push verification.
-
-Several PRs change generated route, checkpoint, geofence, or submitted activity semantics (#41, #42, #44, #51, #53, #60, #63, #66, #105, #106, #107). They were not included in this maintenance integration; this is a scope/safety decision, not a claim that each PR is technically incorrect. #57 and #79 need separate privacy/platform compatibility review; #82 needs timestamp compatibility coverage. The report documents per-PR heads, paths, decisions, overlap groups, and actual test results.
-
-Suggested safe review order: #43, #52. Please review route/submission changes separately against the project’s activity authenticity requirements. PR URLs: https://github.com/YanamiNeko/NekoSportsWorldTool/pulls?q=is%3Apr+is%3Aopen+41%2C42%2C43%2C44%2C51%2C52%2C53%2C57%2C60%2C63%2C66%2C79%2C82%2C105%2C106%2C107
+本报告是社区成员基于公开代码进行的非官方审查和有限整合，不代表上游维护者认可或合并。是否采纳任何 PR 由作者或具备权限的维护者决定。
