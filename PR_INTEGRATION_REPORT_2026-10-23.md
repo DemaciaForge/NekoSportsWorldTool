@@ -9,7 +9,7 @@
 - Fork 默认分支当时为 `9ac21e4cddb2a3b71ee7dad17bc58e47af430b4e`，与上游分叉，含 Fork 独有历史；本次没有改动 Fork `main`。
 - 重新核对 16 个开放 PR。最终仅保留 #43；#52 曾短暂整合，但导致 10 项既有 UI 可达性测试失败，干净上游基线全部通过，故已从整合分支撤回并暂缓。
 - 当前分类：完整采用 1 项（#43）；部分采用 0 项；修复后采用 0 项；暂缓 6 项（#42、#52、#57、#66、#79、#82）；不纳入 9 项（#41、#44、#51、#53、#60、#63、#105、#106、#107）。
-- 没有创建二进制 Release。上游现有程序及本分支并未完成防止合成活动记录被真实提交的整体安全改造；按本任务安全边界，不发布可用于此类提交的公开二进制。
+- 已创建源码专用非官方 Release `integration-2026-10-23`，目标提交为 `bf894b803598346e88829bf6aedb29d15cf4f92c`。未生成或上传可执行二进制；自动发布工作流仅由 `v*` 标签触发，因此本次使用整合快照标签避免触发二进制构建。
 - 没有向真实校园运动服务发请求，也没有使用真实凭据或个人运动数据。
 
 ## 二、PR 审核总表
@@ -85,11 +85,12 @@
 
 - Fork 整合分支已推送：<https://github.com/DemaciaForge/NekoSportsWorldTool/tree/integration/upstream-main-pr-audit-2026-10-23>
 - 本报告对应提交：以推送后核验的最新分支 SHA 为准。
-- Fork `main` 未变；未创建新 tag 或 Release，故没有本次下载文件或 SHA-256。
+- Fork `main` 未变；源码 Release：<https://github.com/DemaciaForge/NekoSportsWorldTool/releases/tag/integration-2026-10-23>。未上传二进制文件，因此没有二进制文件大小或 SHA-256。
 - Fork 已有历史 Release（包括 v0.4.1）；这些历史发布不属于本次整合结果。
 - 上游 Issue #108 更新后链接：<https://github.com/YanamiNeko/NekoSportsWorldTool/issues/108>。
 
 ## 九、非官方声明
 
 本报告是社区成员基于公开代码进行的非官方审查和有限整合，不代表上游维护者认可或合并。是否采纳任何 PR 由作者或具备权限的维护者决定。
+
 
