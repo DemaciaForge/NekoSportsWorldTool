@@ -38,7 +38,7 @@
 ## 📦 Fork 分支与 Release
 
 - Fork 整合分支：<https://github.com/DemaciaForge/NekoSportsWorldTool/tree/integration/upstream-main-pr-audit-2026-10-23>
-- 当前分支远端 HEAD 为 `293ab9d471882674c8030f6fce95d36f0c24047f`；撤回 #52 的提交为 `8c95f6e`；水印替代修复提交为 `24f9663`，上游替代 PR 为 #109。
+- 当前分支远端 HEAD 为 `293ab9d471882674c8030f6fce95d36f0c24047f`；撤回 #52 的提交为 `8c95f6e`；水印替代修复提交为 `24f9663`，上游替代 PR 为 [#109](https://github.com/YanamiNeko/NekoSportsWorldTool/pull/109)。
 - 没有本次 Release、Tag、二进制下载文件或 SHA-256，因此不提供虚构版本号或下载链接。
 - Fork 既有 v0.4.1 等历史 Release 并非本次审查的产物。
 - 原因：本次只做维护性整合，未完成对程序整体活动真实性边界的改造；因此不发布可用于把合成活动记录作为真实活动提交的公开二进制。
@@ -103,5 +103,6 @@ Clippy / Release 构建                           未执行
 ## 🤝 开放协作与非官方声明
 
 本次工作是社区贡献者基于公开代码开展的非官方审查和有限整合，不代表作者或维护者认可。只有作者或具备相应权限的维护者可以决定是否将建议合并到上游。欢迎维护者和其他贡献者针对报告中的代码证据、测试结果及处理建议继续讨论。
+
 
 
