@@ -4,7 +4,7 @@
 
 本公告记录 2026-10-23 对上游当前开放 PR 的重新审查及有限整合。上游 `main` 基线为 `e229abdbab71e377b86632e588e607413af4b93c`（2026-10-20）。本次在个人 Fork 的独立分支整合 PR #43；PR #52 曾试合并，但造成 UI 布局回归，已撤回并暂缓。其余 PR 均未被整合。
 
-当前整合分支通过离线工作区测试和 all-target 检查。由于现有程序尚未满足本次审查采用的活动真实性发布边界，本次没有构建或发布公开二进制，也没有创建新版本标签。此公告不声称上游已采纳任何建议。
+当前整合分支通过离线工作区测试和 all-target 检查。已创建源码专用的非官方整合 Release `integration-2026-10-23`；未构建或上传可执行二进制，以遵守本次审查采用的活动真实性发布边界。此公告不声称上游已采纳任何建议。
 
 ## 📋 全部 16 个 PR 审核状态
 
@@ -38,8 +38,8 @@
 ## 📦 Fork 分支与 Release
 
 - Fork 整合分支：<https://github.com/DemaciaForge/NekoSportsWorldTool/tree/integration/upstream-main-pr-audit-2026-10-23>
-- 当前分支远端 HEAD 为 `909118e7e1a337ee38736f8ac2917aa5fcfa2d21`；撤回 #52 的提交为 `8c95f6e`；水印替代修复提交为 `24f9663`，上游替代 PR 为 [#109](https://github.com/YanamiNeko/NekoSportsWorldTool/pull/109)。
-- 没有本次 Release、Tag、二进制下载文件或 SHA-256，因此不提供虚构版本号或下载链接。
+- Fork 整合分支：[integration/upstream-main-pr-audit-2026-10-23](https://github.com/DemaciaForge/NekoSportsWorldTool/tree/integration/upstream-main-pr-audit-2026-10-23)；Release 对应源码提交：`bf894b803598346e88829bf6aedb29d15cf4f92c`（该提交包含通过测试的整合代码）。后续报告更新以分支最新 HEAD 为准。`
+- 源码 Release：[integration-2026-10-23](https://github.com/DemaciaForge/NekoSportsWorldTool/releases/tag/integration-2026-10-23)。GitHub 提供源码归档；未上传二进制，因此没有二进制文件 SHA-256。
 - Fork 既有 v0.4.1 等历史 Release 并非本次审查的产物。
 - 原因：本次只做维护性整合，未完成对程序整体活动真实性边界的改造；因此不发布可用于把合成活动记录作为真实活动提交的公开二进制。
 
@@ -78,7 +78,7 @@ Clippy / Release 构建                           未执行
 | 不纳入 | 9（#41、#44、#51、#53、#60、#63、#105、#106、#107） |
 | 最终整合分支测试 | 197 项通过、0 失败；命令涵盖 182 + 8 + 7 项 |
 | 基线测试 | 197 项通过、0 失败 |
-| Release | 未发布 |
+| Release | 已发布源码快照；未发布二进制 |
 
 ## 🎯 对上游维护者的建议
 
@@ -103,6 +103,7 @@ Clippy / Release 构建                           未执行
 ## 🤝 开放协作与非官方声明
 
 本次工作是社区贡献者基于公开代码开展的非官方审查和有限整合，不代表作者或维护者认可。只有作者或具备相应权限的维护者可以决定是否将建议合并到上游。欢迎维护者和其他贡献者针对报告中的代码证据、测试结果及处理建议继续讨论。
+
 
 
 
